@@ -882,8 +882,17 @@ def main():
     ))
     
     # Запуск бота
-    logger.info("Бот запущен!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        logger.info("Бот запущен!")
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True  # Пропускать обновления при старте
+        )
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
+        raise
 
 
 if __name__ == '__main__':
