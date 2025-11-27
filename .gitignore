@@ -41,3 +41,7 @@ wheels/
 # Photos
 photos/
 
+# Logs
+logs/
+*.log
+

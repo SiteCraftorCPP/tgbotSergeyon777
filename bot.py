@@ -18,9 +18,28 @@ import admin
 from admin import is_admin
 
 # Настройка логирования
+import logging.handlers
+
+# Создаем директорию для логов
+if not os.path.exists('logs'):
+    os.makedirs('logs')
+
+# Настройка логирования в файл и консоль
+log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+file_handler = logging.handlers.RotatingFileHandler(
+    'logs/bot.log',
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=5,
+    encoding='utf-8'
+)
+file_handler.setFormatter(logging.Formatter(log_format))
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter(log_format))
+
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[file_handler, console_handler]
 )
 logger = logging.getLogger(__name__)
 
@@ -794,11 +813,26 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Запуск бота"""
+    # Проверка токена
+    if not config.BOT_TOKEN:
+        logger.error("BOT_TOKEN не указан в .env файле!")
+        return
+    
     # Инициализация БД
-    db.init_db()
+    try:
+        db.init_db()
+        logger.info("База данных инициализирована")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации БД: {e}")
+        return
     
     # Создание приложения
-    application = Application.builder().token(config.BOT_TOKEN).build()
+    try:
+        application = Application.builder().token(config.BOT_TOKEN).build()
+        logger.info("Приложение создано")
+    except Exception as e:
+        logger.error(f"Ошибка создания приложения: {e}")
+        return
     
     # Обработчик регистрации
     conv_handler = ConversationHandler(

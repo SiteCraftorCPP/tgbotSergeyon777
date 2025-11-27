@@ -19,8 +19,14 @@ else:
 if 6933111964 not in ADMIN_IDS:
     ADMIN_IDS.append(6933111964)
 
-DATABASE_URL = 'sqlite:///dating_bot.db'
-PHOTOS_DIR = 'photos'
+# Поддержка PostgreSQL для продакшена
+# Если указан DATABASE_URL, используем его, иначе SQLite
+DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///dating_bot.db')
+# Конвертируем postgres:// в postgresql:// для SQLAlchemy
+if DATABASE_URL.startswith('postgres://'):
+    DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+
+PHOTOS_DIR = os.getenv('PHOTOS_DIR', 'photos')
 
 # Создаем директорию для фотографий
 if not os.path.exists(PHOTOS_DIR):
