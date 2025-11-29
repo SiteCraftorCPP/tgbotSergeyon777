@@ -33,10 +33,17 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("У вас нет прав доступа к админ панели.")
         return
     
+    session = db.get_session()
+    try:
+        male_count = session.query(db.User).filter_by(gender='male', is_active=True).count()
+        female_count = session.query(db.User).filter_by(gender='female', is_active=True).count()
+    finally:
+        session.close()
+    
     keyboard = [
         [InlineKeyboardButton("➕ Добавить женскую анкету", callback_data='admin_add_female')],
         [InlineKeyboardButton("📊 Статистика", callback_data='admin_stats')],
-        [InlineKeyboardButton("👥 Список анкет", callback_data='admin_list_profiles')]
+        [InlineKeyboardButton(f"👥 Список анкет (👨 {male_count} | 👩 {female_count})", callback_data='admin_list_profiles')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -194,16 +201,15 @@ async def admin_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         total_users = session.query(db.User).count()
         male_users = session.query(db.User).filter_by(gender='male').count()
         female_users = session.query(db.User).filter_by(gender='female').count()
-        total_likes = session.query(db.Like).count()
-        active_chats = session.query(db.Like).filter_by(chat_started=True).count()
+        
+        active_male = session.query(db.User).filter_by(gender='male', is_active=True).count()
+        active_female = session.query(db.User).filter_by(gender='female', is_active=True).count()
         
         text = (
             f"📊 Статистика бота\n\n"
             f"👥 Всего пользователей: {total_users}\n"
-            f"👨 Мужчин: {male_users}\n"
-            f"👩 Женщин: {female_users}\n\n"
-            f"❤️ Всего лайков: {total_likes}\n"
-            f"💬 Активных чатов: {active_chats}"
+            f"   👨 Мужчин: {male_users} (активных: {active_male})\n"
+            f"   👩 Женщин: {female_users} (активных: {active_female})"
         )
         
         await query.message.reply_text(text)

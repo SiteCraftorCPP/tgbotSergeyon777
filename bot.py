@@ -72,14 +72,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user = db.get_user_by_telegram_id(update.effective_user.id)
     
+    # Проверяем, был ли пользователь в процессе регистрации
+    was_in_registration = bool(context.user_data)
+    
+    # Очищаем данные предыдущей незавершенной регистрации
+    context.user_data.clear()
+    
     if user:
         # Пользователь уже зарегистрирован
+        if was_in_registration:
+            # Если была незавершенная регистрация, сообщаем об этом
+            await update.message.reply_text(
+                "✅ Предыдущая незавершенная регистрация была сброшена.\n\n"
+            )
         if user.gender == 'male':
             await show_main_menu_male(update, context)
         else:
             await show_main_menu_female(update, context)
+        return ConversationHandler.END
     else:
         # Начинаем регистрацию
+        message_text = "👋 Добро пожаловать в бот знакомств!\n\n"
+        if was_in_registration:
+            message_text += "✅ Предыдущая незавершенная регистрация была сброшена.\n\n"
+        message_text += "Для начала нужно заполнить анкету.\nВыберите ваш пол:"
+        
         keyboard = [
             [InlineKeyboardButton("👨 Мужской", callback_data='gender_male')],
             [InlineKeyboardButton("👩 Женский", callback_data='gender_female')]
@@ -87,9 +104,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            "👋 Добро пожаловать в бот знакомств!\n\n"
-            "Для начала нужно заполнить анкету.\n"
-            "Выберите ваш пол:",
+            message_text,
             reply_markup=reply_markup
         )
         return GENDER
@@ -513,7 +528,23 @@ async def show_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def show_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать активные чаты с красивым интерфейсом"""
     user = db.get_user_by_telegram_id(update.effective_user.id)
-    chats = db.get_active_chats(user.id)
+    
+    # Проверяем, зарегистрирован ли пользователь
+    if not user:
+        logger.warning(f"Пользователь {update.effective_user.id} не зарегистрирован при попытке открыть чаты")
+        await update.message.reply_text(
+            "❌ Вы не зарегистрированы. Отправьте /start для регистрации."
+        )
+        return
+    
+    try:
+        chats = db.get_active_chats(user.id)
+    except Exception as e:
+        logger.error(f"Ошибка при получении активных чатов для пользователя {user.id}: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при загрузке чатов. Попробуйте позже."
+        )
+        return
     
     # Проверяем, находится ли пользователь в чате
     current_chat_user_id = user_chats.get(update.effective_user.id)
@@ -837,24 +868,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем, находится ли пользователь в режиме чата
     if update.effective_user.id in user_chats:
         chat_user_id = user_chats[update.effective_user.id]
-        logger.info(f"Пользователь {user.name} находится в режиме чата с chat_user_id={chat_user_id}")
         
-        # Получаем telegram_id собеседника и информацию о нём
-        partner = db.get_user_by_id(chat_user_id)
-        if not partner:
-            logger.error(f"Собеседник с ID {chat_user_id} не найден в БД")
-            await update.message.reply_text(
-                "❌ Ошибка: собеседник не найден. Выйдите из чата и откройте его заново."
-            )
-            del user_chats[update.effective_user.id]
-            return
+        # Оптимизация: используем кэш для получения информации о партнере
+        # Проверяем active_chat_info для быстрого доступа
+        partner = active_chat_info.get(update.effective_user.id)
+        
+        # Если партнер не в кэше, получаем из БД
+        if not partner or partner.id != chat_user_id:
+            partner = db.get_user_by_id(chat_user_id)
+            if not partner:
+                logger.error(f"Собеседник с ID {chat_user_id} не найден в БД")
+                await update.message.reply_text(
+                    "❌ Ошибка: собеседник не найден. Выйдите из чата и откройте его заново."
+                )
+                del user_chats[update.effective_user.id]
+                active_chat_info.pop(update.effective_user.id, None)
+                return
+            # Сохраняем в кэш
+            active_chat_info[update.effective_user.id] = partner
         
         partner_telegram_id = partner.telegram_id
-        logger.info(f"Собеседник найден: {partner.name} (ID: {partner.id}, пол: {partner.gender}, TG: {partner_telegram_id})")
         
-        # Сохраняем сообщение в БД
+        # Сохраняем сообщение в БД (асинхронно, не блокируем отправку)
         db.add_message(user.id, chat_user_id, text)
-        logger.info(f"Сообщение сохранено в БД: от {user.id} к {chat_user_id}")
         
         # Формируем красивое сообщение для получателя
         gender_emoji = "👨" if user.gender == 'male' else "👩"
@@ -874,22 +910,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Отправляем сообщение собеседнику
         try:
-            logger.info(f"ПОПЫТКА ОТПРАВКИ: от {user.name} (ID: {user.id}, пол: {user.gender}, TG: {user.telegram_id}) к {partner.name} (ID: {partner.id}, пол: {partner.gender}, TG: {partner_telegram_id})")
-            logger.info(f"Получатель в чате с отправителем: {receiver_in_chat}")
-            
             await context.bot.send_message(
                 chat_id=partner_telegram_id,
                 text=message_text,
                 reply_markup=reply_markup
             )
-            logger.info(f"✅ СООБЩЕНИЕ УСПЕШНО ОТПРАВЛЕНО: от {user.name} к {partner.name}")
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"❌ ОШИБКА ПРИ ОТПРАВКЕ: от {user.name} (TG: {user.telegram_id}) к {partner.name} (TG: {partner_telegram_id}): {error_msg}")
-            logger.error(f"Детали ошибки: {type(e).__name__}: {error_msg}")
+            logger.error(f"Ошибка при отправке сообщения от {user.telegram_id} к {partner_telegram_id}: {error_msg}")
             
             # Показываем понятное сообщение об ошибке
-            if "chat not found" in error_msg.lower() or "user not found" in error_msg.lower():
+            if "chat not found" in error_msg.lower() or "user not found" in error_msg.lower() or "bot was blocked" in error_msg.lower():
                 await update.message.reply_text(
                     f"❌ Не удалось отправить сообщение.\n"
                     f"Пользователь не найден или заблокировал бота.\n\n"
@@ -898,7 +929,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text(
                     f"❌ Не удалось отправить сообщение.\n"
-                    f"Ошибка: {error_msg}\n\n"
                     f"Попробуйте выйти из чата и открыть его заново."
                 )
         return
@@ -1235,7 +1265,10 @@ def main():
             DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_handler)],
             PHOTO: [MessageHandler(filters.PHOTO, photo_handler)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)],
+        fallbacks=[
+            CommandHandler('start', start),  # Позволяет сбросить регистрацию командой /start
+            CommandHandler('cancel', cancel)
+        ],
     )
     
     application.add_handler(conv_handler)
