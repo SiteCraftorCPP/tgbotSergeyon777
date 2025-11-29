@@ -44,11 +44,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Состояния для ConversationHandler
-GENDER, NAME, BIRTH_DATE, CITY, DESCRIPTION, PHOTO = range(6)
+GENDER, NAME, AGE, CITY, DESCRIPTION, PHOTO = range(6)
 CHAT_MODE = 100
 
-# Словарь для хранения активных чатов
+# Словарь для хранения активных чатов {telegram_id: chat_user_id}
 user_chats = {}
+
+# Словарь для хранения информации о текущем собеседнике {telegram_id: partner_user_object}
+active_chat_info = {}
 
 
 async def check_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,27 +130,39 @@ async def name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['name'] = name
     
     await update.message.reply_text(
-        f"Приятно познакомиться, {name}! Теперь укажите вашу дату рождения.\n"
-        f"Формат: ДД.ММ.ГГГГ (например, 25.12.1995)"
+        f"Приятно познакомиться, {name}! 🎂\n\n"
+        f"Сколько вам лет? Напишите число:"
     )
-    return BIRTH_DATE
+    return AGE
 
 
-async def birth_date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик даты рождения"""
-    birth_date = update.message.text.strip()
+async def age_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик возраста"""
+    age_text = update.message.text.strip()
     
-    # Простая валидация
-    if len(birth_date) != 10 or birth_date.count('.') != 2:
+    # Валидация возраста
+    try:
+        age = int(age_text)
+        if age < 18:
+            await update.message.reply_text(
+                "❌ Регистрация доступна только для пользователей старше 18 лет."
+            )
+            return AGE
+        if age > 100:
+            await update.message.reply_text(
+                "❌ Пожалуйста, укажите корректный возраст."
+            )
+            return AGE
+    except ValueError:
         await update.message.reply_text(
-            "❌ Неверный формат даты. Используйте формат ДД.ММ.ГГГГ (например, 25.12.1995)"
+            "❌ Пожалуйста, введите число (например: 22)"
         )
-        return BIRTH_DATE
+        return AGE
     
-    context.user_data['birth_date'] = birth_date
+    context.user_data['age'] = age
     
     await update.message.reply_text(
-        "Отлично! Теперь укажите ваш город:"
+        "🏙 Отлично! Теперь укажите ваш город:"
     )
     return CITY
 
@@ -190,7 +205,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username=update.effective_user.username or "Без username",
         name=context.user_data['name'],
         gender=context.user_data['gender'],
-        birth_date=context.user_data['birth_date'],
+        age=context.user_data['age'],
         city=context.user_data['city'],
         description=context.user_data['description'],
         photo_path=file_path
@@ -289,9 +304,8 @@ async def browse_profiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Формируем текст анкеты
     text = (
-        f"👩 {profile.name}\n\n"
-        f"Дата рождения: {profile.birth_date}\n"
-        f"Город: {user.city}\n\n"  # Показываем город ПОЛЬЗОВАТЕЛЯ, а не девушки
+        f"👩 {profile.name}, {profile.age}\n"
+        f"📍 {user.city}\n\n"  # Показываем город ПОЛЬЗОВАТЕЛЯ, а не девушки
         f"{profile.description}"
     )
     
@@ -342,11 +356,17 @@ async def like_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            await context.bot.send_message(
-                chat_id=profile.telegram_id,
-                text=f"❤️ У вас новая симпатия!\n\nКто-то проявил к вам интерес.",
-                reply_markup=reply_markup
-            )
+            try:
+                logger.info(f"Отправка уведомления о симпатии: от {user.name} (TG: {user.telegram_id}) к {profile.name} (TG: {profile.telegram_id})")
+                await context.bot.send_message(
+                    chat_id=profile.telegram_id,
+                    text=f"❤️ У вас новая симпатия!\n\nКто-то проявил к вам интерес.",
+                    reply_markup=reply_markup
+                )
+                logger.info(f"Уведомление о симпатии успешно отправлено {profile.name} (TG: {profile.telegram_id})")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке уведомления о симпатии к {profile.name} (TG: {profile.telegram_id}): {e}")
+                # Не показываем ошибку отправителю, просто логируем
         finally:
             session.close()
         
@@ -381,9 +401,8 @@ async def view_like_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         # Формируем текст анкеты
         text = (
-            f"👨 {from_user.name}\n\n"
-            f"Дата рождения: {from_user.birth_date}\n"
-            f"Город: {to_user.city}\n\n"  # Показываем город девушки
+            f"👨 {from_user.name}, {from_user.age}\n"
+            f"📍 {to_user.city}\n\n"  # Показываем город девушки
             f"{from_user.description}"
         )
         
@@ -425,13 +444,31 @@ async def start_chat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         like = session.query(db.Like).filter_by(id=like_id).first()
         from_user = session.query(db.User).filter_by(id=like.from_user_id).first()
+        to_user = session.query(db.User).filter_by(id=like.to_user_id).first()
         
         # Уведомляем мужчину
-        await context.bot.send_message(
-            chat_id=from_user.telegram_id,
-            text=f"💬 Отличные новости!\n\nДевушка хочет начать с вами диалог.\n"
-                 f"Перейдите в '💬 Мои чаты' чтобы начать общение."
-        )
+        try:
+            logger.info(f"Отправка уведомления о начале чата: от девушки {to_user.name} (TG: {to_user.telegram_id}) к мужчине {from_user.name} (TG: {from_user.telegram_id})")
+            await context.bot.send_message(
+                chat_id=from_user.telegram_id,
+                text=f"💬 Отличные новости!\n\nДевушка хочет начать с вами диалог.\n"
+                     f"Перейдите в '💬 Мои чаты' чтобы начать общение."
+            )
+            logger.info(f"Уведомление успешно отправлено мужчине {from_user.name} (TG: {from_user.telegram_id})")
+        except Exception as e:
+            logger.error(f"Ошибка при отправке уведомления мужчине {from_user.name} (TG: {from_user.telegram_id}): {e}")
+        
+        # Уведомляем девушку, что чат начат
+        try:
+            logger.info(f"Отправка уведомления девушке {to_user.name} (TG: {to_user.telegram_id}) о начале чата")
+            await context.bot.send_message(
+                chat_id=to_user.telegram_id,
+                text=f"✅ Диалог начат!\n\nВы можете начать общение с {from_user.name}.\n"
+                     f"Перейдите в '💬 Мои чаты' чтобы начать переписку."
+            )
+            logger.info(f"Уведомление успешно отправлено девушке {to_user.name} (TG: {to_user.telegram_id})")
+        except Exception as e:
+            logger.error(f"Ошибка при отправке уведомления девушке {to_user.name} (TG: {to_user.telegram_id}): {e}")
         
         await query.edit_message_caption(
             caption=query.message.caption + "\n\n✅ Диалог начат! Перейдите в '💬 Мои чаты'."
@@ -474,21 +511,24 @@ async def show_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def show_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать активные чаты"""
+    """Показать активные чаты с красивым интерфейсом"""
     user = db.get_user_by_telegram_id(update.effective_user.id)
     chats = db.get_active_chats(user.id)
     
+    # Проверяем, находится ли пользователь в чате
+    current_chat_user_id = user_chats.get(update.effective_user.id)
+    
     if not chats:
         await update.message.reply_text(
-            "У вас пока нет активных чатов."
+            "📭 У вас пока нет активных чатов.\n\n"
+            "Чтобы начать общение:\n"
+            "• Мужчины: поставьте ❤️ понравившейся анкете\n"
+            "• Женщины: дождитесь симпатии и нажмите 'Начать диалог'"
         )
         return
     
-    await update.message.reply_text(
-        f"💬 У вас {len(chats)} активных чатов.\n"
-        f"Выберите чат:"
-    )
-    
+    # Формируем красивый список чатов с кнопками
+    chat_buttons = []
     session = db.get_session()
     try:
         for like in chats:
@@ -498,46 +538,246 @@ async def show_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 chat_user = session.query(db.User).filter_by(id=like.from_user_id).first()
             
-            keyboard = [
-                [InlineKeyboardButton(
-                    f"💬 Открыть чат", 
+            if not chat_user:
+                continue
+            
+            # Формируем текст кнопки
+            gender_emoji = "👨" if chat_user.gender == 'male' else "👩"
+            active_marker = " ✅" if current_chat_user_id == chat_user.id else ""
+            
+            button_text = f"{gender_emoji} {chat_user.name}, {chat_user.age}{active_marker}"
+            
+            chat_buttons.append([
+                InlineKeyboardButton(
+                    button_text, 
                     callback_data=f'open_chat_{chat_user.id}'
-                )]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            # Показываем краткую инфо
-            text = f"Чат с {chat_user.name}\nГород: {chat_user.city}"
-            
-            try:
-                with open(chat_user.photo_path, 'rb') as photo:
-                    await update.message.reply_photo(
-                        photo=photo,
-                        caption=text,
-                        reply_markup=reply_markup
-                    )
-            except:
-                await update.message.reply_text(text, reply_markup=reply_markup)
+                )
+            ])
+        
+        # Добавляем кнопку выхода из чата, если пользователь сейчас в чате
+        if current_chat_user_id:
+            chat_buttons.append([
+                InlineKeyboardButton("🚪 Выйти из текущего чата", callback_data='exit_current_chat')
+            ])
+        
+        reply_markup = InlineKeyboardMarkup(chat_buttons)
+        
+        # Информация о текущем чате
+        if current_chat_user_id:
+            current_partner = db.get_user_by_id(current_chat_user_id)
+            if current_partner:
+                current_chat_info = f"\n\n💬 Сейчас вы пишете: {current_partner.name}"
+            else:
+                current_chat_info = ""
+        else:
+            current_chat_info = "\n\n💡 Выберите чат, чтобы начать переписку"
+        
+        await update.message.reply_text(
+            f"💬 Ваши чаты ({len(chats)}){current_chat_info}",
+            reply_markup=reply_markup
+        )
     finally:
         session.close()
 
 
 async def open_chat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Открыть чат с пользователем"""
+    """Открыть чат с пользователем - показать аватарку и красивый интерфейс"""
     query = update.callback_query
     await query.answer()
     
     chat_user_id = int(query.data.split('_')[2])
     user = db.get_user_by_telegram_id(update.effective_user.id)
     
+    # Получаем информацию о собеседнике
+    chat_partner = db.get_user_by_id(chat_user_id)
+    if not chat_partner:
+        await query.message.reply_text("❌ Пользователь не найден.")
+        return
+    
     # Сохраняем активный чат пользователя
     user_chats[update.effective_user.id] = chat_user_id
+    active_chat_info[update.effective_user.id] = chat_partner
+    
+    logger.info(f"Чат открыт: пользователь {user.name} (ID: {user.id}, пол: {user.gender}, TG: {user.telegram_id}) открыл чат с {chat_partner.name} (ID: {chat_partner.id}, пол: {chat_partner.gender}, TG: {chat_partner.telegram_id})")
+    
+    # Отмечаем сообщения как прочитанные
+    db.mark_messages_as_read(user.id, chat_user_id)
+    
+    # Уведомляем собеседника, что пользователь подключился к чату
+    try:
+        gender_emoji = "👨" if user.gender == 'male' else "👩"
+        await context.bot.send_message(
+            chat_id=chat_partner.telegram_id,
+            text=f"💬 {gender_emoji} {user.name} подключился(ась) к чату.\n\nТеперь вы можете общаться!"
+        )
+        logger.info(f"Уведомление о подключении к чату отправлено {chat_partner.name} (TG: {chat_partner.telegram_id})")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке уведомления о подключении к чату {chat_partner.name} (TG: {chat_partner.telegram_id}): {e}")
+    
+    gender_emoji = "👨" if chat_partner.gender == 'male' else "👩"
+    
+    # Кнопки управления чатом
+    keyboard = [
+        [
+            InlineKeyboardButton("📋 Все чаты", callback_data='show_all_chats'),
+            InlineKeyboardButton("🚪 Выйти", callback_data='exit_current_chat')
+        ],
+        [
+            InlineKeyboardButton("👤 Анкета собеседника", callback_data=f'view_partner_{chat_user_id}')
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Формируем красивое сообщение с аватаркой
+    text = (
+        f"💬 Чат открыт!\n\n"
+        f"{gender_emoji} {chat_partner.name}, {chat_partner.age}\n"
+        f"📍 {chat_partner.city}\n\n"
+        f"✏️ Теперь все ваши сообщения отправляются {chat_partner.name}.\n"
+        f"Просто пишите текст, отправляйте фото или видео!"
+    )
+    
+    # Отправляем аватарку собеседника с информацией
+    try:
+        with open(chat_partner.photo_path, 'rb') as photo:
+            await query.message.reply_photo(
+                photo=photo,
+                caption=text,
+                reply_markup=reply_markup
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке фото: {e}")
+        await query.message.reply_text(text, reply_markup=reply_markup)
+
+
+async def exit_chat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выйти из текущего чата (callback)"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    chat_partner = None
+    
+    # Получаем информацию о собеседнике перед выходом
+    if update.effective_user.id in user_chats:
+        chat_user_id = user_chats[update.effective_user.id]
+        chat_partner = db.get_user_by_id(chat_user_id)
+        del user_chats[update.effective_user.id]
+    
+    if update.effective_user.id in active_chat_info:
+        del active_chat_info[update.effective_user.id]
+    
+    # Уведомляем собеседника, что пользователь покинул чат
+    if chat_partner and user:
+        try:
+            gender_emoji = "👨" if user.gender == 'male' else "👩"
+            await context.bot.send_message(
+                chat_id=chat_partner.telegram_id,
+                text=f"🚪 {gender_emoji} {user.name} покинул(а) чат."
+            )
+            logger.info(f"Уведомление о выходе из чата отправлено {chat_partner.name} (TG: {chat_partner.telegram_id})")
+        except Exception as e:
+            logger.error(f"Ошибка при отправке уведомления о выходе из чата {chat_partner.name} (TG: {chat_partner.telegram_id}): {e}")
     
     await query.message.reply_text(
-        "💬 Чат открыт!\n\n"
-        "Теперь все ваши сообщения будут отправляться собеседнику.\n"
-        "Для выхода из чата используйте команду /exit"
+        "🚪 Вы вышли из чата.\n\n"
+        "Нажмите '💬 Мои чаты' чтобы выбрать другой чат."
     )
+
+
+async def show_all_chats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать все чаты (callback версия)"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    chats = db.get_active_chats(user.id)
+    
+    current_chat_user_id = user_chats.get(update.effective_user.id)
+    
+    if not chats:
+        await query.message.reply_text("📭 У вас пока нет активных чатов.")
+        return
+    
+    chat_buttons = []
+    session = db.get_session()
+    try:
+        for like in chats:
+            if like.from_user_id == user.id:
+                chat_user = session.query(db.User).filter_by(id=like.to_user_id).first()
+            else:
+                chat_user = session.query(db.User).filter_by(id=like.from_user_id).first()
+            
+            if not chat_user:
+                continue
+            
+            gender_emoji = "👨" if chat_user.gender == 'male' else "👩"
+            active_marker = " ✅" if current_chat_user_id == chat_user.id else ""
+            
+            button_text = f"{gender_emoji} {chat_user.name}, {chat_user.age}{active_marker}"
+            
+            chat_buttons.append([
+                InlineKeyboardButton(button_text, callback_data=f'open_chat_{chat_user.id}')
+            ])
+        
+        if current_chat_user_id:
+            chat_buttons.append([
+                InlineKeyboardButton("🚪 Выйти из текущего чата", callback_data='exit_current_chat')
+            ])
+        
+        reply_markup = InlineKeyboardMarkup(chat_buttons)
+        
+        if current_chat_user_id:
+            current_partner = db.get_user_by_id(current_chat_user_id)
+            if current_partner:
+                current_chat_info = f"\n\n💬 Сейчас вы пишете: {current_partner.name}"
+            else:
+                current_chat_info = ""
+        else:
+            current_chat_info = "\n\n💡 Выберите чат, чтобы начать переписку"
+        
+        await query.message.reply_text(
+            f"💬 Ваши чаты ({len(chats)}){current_chat_info}",
+            reply_markup=reply_markup
+        )
+    finally:
+        session.close()
+
+
+async def view_partner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Посмотреть анкету собеседника"""
+    query = update.callback_query
+    await query.answer()
+    
+    partner_id = int(query.data.split('_')[2])
+    partner = db.get_user_by_id(partner_id)
+    
+    if not partner:
+        await query.message.reply_text("❌ Пользователь не найден.")
+        return
+    
+    gender_emoji = "👨" if partner.gender == 'male' else "👩"
+    text = (
+        f"{gender_emoji} {partner.name}, {partner.age}\n"
+        f"📍 {partner.city}\n\n"
+        f"{partner.description}"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("🔙 Вернуться к чату", callback_data=f'open_chat_{partner_id}')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    try:
+        with open(partner.photo_path, 'rb') as photo:
+            await query.message.reply_photo(
+                photo=photo,
+                caption=text,
+                reply_markup=reply_markup
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке фото: {e}")
+        await query.message.reply_text(text, reply_markup=reply_markup)
 
 
 def get_chat_partner_telegram_id(chat_user_id: int):
@@ -557,66 +797,129 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user = db.get_user_by_telegram_id(update.effective_user.id)
     
+    logger.info(f"Получено сообщение от пользователя: {update.effective_user.id}, текст: {text[:50]}")
+    
     # Проверяем, зарегистрирован ли пользователь
     if not user:
+        logger.warning(f"Пользователь {update.effective_user.id} не зарегистрирован")
         await update.message.reply_text(
             "❌ Вы не зарегистрированы. Отправьте /start для регистрации."
         )
         return
     
+    logger.info(f"Пользователь найден: {user.name} (ID: {user.id}, пол: {user.gender}, TG: {user.telegram_id})")
+    
+    # Список кнопок меню - если текст является кнопкой меню, обрабатываем как команду, а не отправляем в чат
+    menu_buttons = [
+        "🔍 Смотреть анкеты",
+        "💬 Мои чаты",
+        "❤️ Уведомления о симпатиях",
+        "👤 Моя анкета",
+        "🔧 Админ панель"
+    ]
+    
+    # Если это кнопка меню - обрабатываем как команду меню, не отправляем в чат
+    if text in menu_buttons:
+        logger.info(f"Пользователь {user.name} нажал кнопку меню: {text}")
+        # Обработка кнопок меню
+        if text == "🔍 Смотреть анкеты":
+            await browse_profiles(update, context)
+        elif text == "💬 Мои чаты":
+            await show_chats(update, context)
+        elif text == "❤️ Уведомления о симпатиях":
+            await show_notifications(update, context)
+        elif text == "👤 Моя анкета":
+            await show_my_profile(update, context)
+        elif text == "🔧 Админ панель":
+            await admin.admin_menu(update, context)
+        return
+    
     # Проверяем, находится ли пользователь в режиме чата
     if update.effective_user.id in user_chats:
         chat_user_id = user_chats[update.effective_user.id]
+        logger.info(f"Пользователь {user.name} находится в режиме чата с chat_user_id={chat_user_id}")
         
-        # Получаем telegram_id собеседника
-        partner_telegram_id = get_chat_partner_telegram_id(chat_user_id)
-        if not partner_telegram_id:
+        # Получаем telegram_id собеседника и информацию о нём
+        partner = db.get_user_by_id(chat_user_id)
+        if not partner:
+            logger.error(f"Собеседник с ID {chat_user_id} не найден в БД")
             await update.message.reply_text(
                 "❌ Ошибка: собеседник не найден. Выйдите из чата и откройте его заново."
             )
             del user_chats[update.effective_user.id]
             return
         
+        partner_telegram_id = partner.telegram_id
+        logger.info(f"Собеседник найден: {partner.name} (ID: {partner.id}, пол: {partner.gender}, TG: {partner_telegram_id})")
+        
         # Сохраняем сообщение в БД
         db.add_message(user.id, chat_user_id, text)
+        logger.info(f"Сообщение сохранено в БД: от {user.id} к {chat_user_id}")
+        
+        # Формируем красивое сообщение для получателя
+        gender_emoji = "👨" if user.gender == 'male' else "👩"
+        message_text = f"{gender_emoji} {user.name}:\n\n{text}"
+        
+        # Проверяем, находится ли получатель в чате с отправителем
+        # Если нет - добавляем кнопку для перехода в чат
+        receiver_in_chat = partner_telegram_id in user_chats and user_chats[partner_telegram_id] == user.id
+        reply_markup = None
+        
+        if not receiver_in_chat:
+            # Получатель не в чате с отправителем - добавляем кнопку
+            keyboard = [
+                [InlineKeyboardButton("💬 Перейти в чат", callback_data=f'open_chat_{user.id}')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
         
         # Отправляем сообщение собеседнику
         try:
+            logger.info(f"ПОПЫТКА ОТПРАВКИ: от {user.name} (ID: {user.id}, пол: {user.gender}, TG: {user.telegram_id}) к {partner.name} (ID: {partner.id}, пол: {partner.gender}, TG: {partner_telegram_id})")
+            logger.info(f"Получатель в чате с отправителем: {receiver_in_chat}")
+            
             await context.bot.send_message(
                 chat_id=partner_telegram_id,
-                text=f"💬 {user.name}:\n\n{text}"
+                text=message_text,
+                reply_markup=reply_markup
             )
-            await update.message.reply_text("✅ Сообщение отправлено")
+            logger.info(f"✅ СООБЩЕНИЕ УСПЕШНО ОТПРАВЛЕНО: от {user.name} к {partner.name}")
         except Exception as e:
-            logger.error(f"Ошибка при отправке сообщения: {e}")
-            await update.message.reply_text(
-                f"❌ Не удалось отправить сообщение. Ошибка: {str(e)}"
-            )
+            error_msg = str(e)
+            logger.error(f"❌ ОШИБКА ПРИ ОТПРАВКЕ: от {user.name} (TG: {user.telegram_id}) к {partner.name} (TG: {partner_telegram_id}): {error_msg}")
+            logger.error(f"Детали ошибки: {type(e).__name__}: {error_msg}")
+            
+            # Показываем понятное сообщение об ошибке
+            if "chat not found" in error_msg.lower() or "user not found" in error_msg.lower():
+                await update.message.reply_text(
+                    f"❌ Не удалось отправить сообщение.\n"
+                    f"Пользователь не найден или заблокировал бота.\n\n"
+                    f"Попробуйте выйти из чата и открыть его заново."
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ Не удалось отправить сообщение.\n"
+                    f"Ошибка: {error_msg}\n\n"
+                    f"Попробуйте выйти из чата и открыть его заново."
+                )
         return
-    
-    # Обработка кнопок меню
-    if text == "🔍 Смотреть анкеты":
-        await browse_profiles(update, context)
-    elif text == "💬 Мои чаты":
-        await show_chats(update, context)
-    elif text == "❤️ Уведомления о симпатиях":
-        await show_notifications(update, context)
-    elif text == "👤 Моя анкета":
-        await show_my_profile(update, context)
-    elif text == "🔧 Админ панель":
-        await admin.admin_menu(update, context)
+    else:
+        logger.info(f"Пользователь {user.name} НЕ находится в режиме чата. user_chats keys: {list(user_chats.keys())}")
+        # Если пользователь не в чате и это не кнопка меню - просто игнорируем или показываем подсказку
+        await update.message.reply_text(
+            "💡 Вы не находитесь в чате.\n\n"
+            "Используйте кнопки меню для навигации или откройте чат через '💬 Мои чаты'."
+        )
 
 
 async def show_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать свою анкету"""
     user = db.get_user_by_telegram_id(update.effective_user.id)
     
+    gender_emoji = "👨" if user.gender == 'male' else "👩"
     text = (
         f"👤 Ваша анкета:\n\n"
-        f"Имя: {user.name}\n"
-        f"Пол: {'Мужской' if user.gender == 'male' else 'Женский'}\n"
-        f"Дата рождения: {user.birth_date}\n"
-        f"Город: {user.city}\n\n"
+        f"{gender_emoji} {user.name}, {user.age}\n"
+        f"📍 {user.city}\n\n"
         f"{user.description}"
     )
     
@@ -629,11 +932,35 @@ async def show_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def exit_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Выйти из чата"""
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    chat_partner = None
+    
+    # Получаем информацию о собеседнике перед выходом
     if update.effective_user.id in user_chats:
+        chat_user_id = user_chats[update.effective_user.id]
+        chat_partner = db.get_user_by_id(chat_user_id)
         del user_chats[update.effective_user.id]
-        await update.message.reply_text("Вы вышли из чата.")
+        if update.effective_user.id in active_chat_info:
+            del active_chat_info[update.effective_user.id]
+        
+        # Уведомляем собеседника, что пользователь покинул чат
+        if chat_partner and user:
+            try:
+                gender_emoji = "👨" if user.gender == 'male' else "👩"
+                await context.bot.send_message(
+                    chat_id=chat_partner.telegram_id,
+                    text=f"🚪 {gender_emoji} {user.name} покинул(а) чат."
+                )
+                logger.info(f"Уведомление о выходе из чата отправлено {chat_partner.name} (TG: {chat_partner.telegram_id})")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке уведомления о выходе из чата {chat_partner.name} (TG: {chat_partner.telegram_id}): {e}")
+        
+        await update.message.reply_text(
+            "🚪 Вы вышли из чата.\n\n"
+            "Нажмите '💬 Мои чаты' чтобы выбрать другой чат."
+        )
     else:
-        await update.message.reply_text("Вы не находитесь в чате.")
+        await update.message.reply_text("❓ Вы не находитесь в чате.")
 
 
 async def handle_photo_in_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -655,36 +982,57 @@ async def handle_photo_in_chat(update: Update, context: ContextTypes.DEFAULT_TYP
     photo = update.message.photo[-1]  # Берем фото наибольшего размера
     caption = update.message.caption or ""
     
-    # Получаем telegram_id собеседника
-    partner_telegram_id = get_chat_partner_telegram_id(chat_user_id)
-    if not partner_telegram_id:
+    # Получаем информацию о собеседнике
+    partner = db.get_user_by_id(chat_user_id)
+    if not partner:
         await update.message.reply_text(
             "❌ Ошибка: собеседник не найден. Выйдите из чата и откройте его заново."
         )
         del user_chats[update.effective_user.id]
         return
     
-    # Сохраняем сообщение в БД (если есть подпись)
+    # Сохраняем сообщение в БД
     if caption:
         db.add_message(user.id, chat_user_id, f"[Фото] {caption}")
     else:
         db.add_message(user.id, chat_user_id, "[Фото]")
     
+    # Проверяем, находится ли получатель в чате с отправителем
+    receiver_in_chat = partner.telegram_id in user_chats and user_chats[partner.telegram_id] == user.id
+    reply_markup = None
+    
+    if not receiver_in_chat:
+        keyboard = [[InlineKeyboardButton("💬 Перейти в чат", callback_data=f'open_chat_{user.id}')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+    
     # Отправляем фото собеседнику
     try:
+        gender_emoji = "👨" if user.gender == 'male' else "👩"
+        photo_caption = f"📷 {gender_emoji} {user.name}"
         if caption:
-            await context.bot.send_photo(
-                chat_id=partner_telegram_id,
-                photo=photo.file_id,
-                caption=f"📷 {user.name}:\n\n{caption}"
+            photo_caption += f":\n\n{caption}"
+        
+        logger.info(f"Отправка фото: от {user.name} (TG: {user.telegram_id}) к {partner.name} (TG: {partner.telegram_id})")
+        await context.bot.send_photo(
+            chat_id=partner.telegram_id,
+            photo=photo.file_id,
+            caption=photo_caption,
+            reply_markup=reply_markup
+        )
+        logger.info(f"Фото успешно отправлено от {user.name} к {partner.name}")
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Ошибка при отправке фото от {user.name} (TG: {user.telegram_id}) к {partner.name} (TG: {partner.telegram_id}): {e}")
+        if "chat not found" in error_msg.lower() or "user not found" in error_msg.lower():
+            await update.message.reply_text(
+                f"❌ Не удалось отправить фото.\n"
+                f"Пользователь не найден или заблокировал бота."
             )
         else:
-            await context.bot.send_photo(
-                chat_id=partner_telegram_id,
-                photo=photo.file_id,
-                caption=f"📷 {user.name}"
+            await update.message.reply_text(
+                f"❌ Не удалось отправить фото.\n"
+                f"Ошибка: {error_msg}"
             )
-        await update.message.reply_text("✅ Фото отправлено")
     except Exception as e:
         logger.error(f"Ошибка при отправке фото: {e}")
         await update.message.reply_text(
@@ -711,36 +1059,57 @@ async def handle_video_in_chat(update: Update, context: ContextTypes.DEFAULT_TYP
     video = update.message.video
     caption = update.message.caption or ""
     
-    # Получаем telegram_id собеседника
-    partner_telegram_id = get_chat_partner_telegram_id(chat_user_id)
-    if not partner_telegram_id:
+    # Получаем информацию о собеседнике
+    partner = db.get_user_by_id(chat_user_id)
+    if not partner:
         await update.message.reply_text(
             "❌ Ошибка: собеседник не найден. Выйдите из чата и откройте его заново."
         )
         del user_chats[update.effective_user.id]
         return
     
-    # Сохраняем сообщение в БД (если есть подпись)
+    # Сохраняем сообщение в БД
     if caption:
         db.add_message(user.id, chat_user_id, f"[Видео] {caption}")
     else:
         db.add_message(user.id, chat_user_id, "[Видео]")
     
+    # Проверяем, находится ли получатель в чате с отправителем
+    receiver_in_chat = partner.telegram_id in user_chats and user_chats[partner.telegram_id] == user.id
+    reply_markup = None
+    
+    if not receiver_in_chat:
+        keyboard = [[InlineKeyboardButton("💬 Перейти в чат", callback_data=f'open_chat_{user.id}')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+    
     # Отправляем видео собеседнику
     try:
+        gender_emoji = "👨" if user.gender == 'male' else "👩"
+        video_caption = f"🎥 {gender_emoji} {user.name}"
         if caption:
-            await context.bot.send_video(
-                chat_id=partner_telegram_id,
-                video=video.file_id,
-                caption=f"🎥 {user.name}:\n\n{caption}"
+            video_caption += f":\n\n{caption}"
+        
+        logger.info(f"Отправка видео: от {user.name} (TG: {user.telegram_id}) к {partner.name} (TG: {partner.telegram_id})")
+        await context.bot.send_video(
+            chat_id=partner.telegram_id,
+            video=video.file_id,
+            caption=video_caption,
+            reply_markup=reply_markup
+        )
+        logger.info(f"Видео успешно отправлено от {user.name} к {partner.name}")
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Ошибка при отправке видео от {user.name} (TG: {user.telegram_id}) к {partner.name} (TG: {partner.telegram_id}): {e}")
+        if "chat not found" in error_msg.lower() or "user not found" in error_msg.lower():
+            await update.message.reply_text(
+                f"❌ Не удалось отправить видео.\n"
+                f"Пользователь не найден или заблокировал бота."
             )
         else:
-            await context.bot.send_video(
-                chat_id=partner_telegram_id,
-                video=video.file_id,
-                caption=f"🎥 {user.name}"
+            await update.message.reply_text(
+                f"❌ Не удалось отправить видео.\n"
+                f"Ошибка: {error_msg}"
             )
-        await update.message.reply_text("✅ Видео отправлено")
     except Exception as e:
         logger.error(f"Ошибка при отправке видео: {e}")
         await update.message.reply_text(
@@ -767,9 +1136,9 @@ async def handle_document_in_chat(update: Update, context: ContextTypes.DEFAULT_
     document = update.message.document
     caption = update.message.caption or ""
     
-    # Получаем telegram_id собеседника
-    partner_telegram_id = get_chat_partner_telegram_id(chat_user_id)
-    if not partner_telegram_id:
+    # Получаем информацию о собеседнике
+    partner = db.get_user_by_id(chat_user_id)
+    if not partner:
         await update.message.reply_text(
             "❌ Ошибка: собеседник не найден. Выйдите из чата и откройте его заново."
         )
@@ -783,21 +1152,42 @@ async def handle_document_in_chat(update: Update, context: ContextTypes.DEFAULT_
     else:
         db.add_message(user.id, chat_user_id, f"[Файл: {file_name}]")
     
+    # Проверяем, находится ли получатель в чате с отправителем
+    receiver_in_chat = partner.telegram_id in user_chats and user_chats[partner.telegram_id] == user.id
+    reply_markup = None
+    
+    if not receiver_in_chat:
+        keyboard = [[InlineKeyboardButton("💬 Перейти в чат", callback_data=f'open_chat_{user.id}')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+    
     # Отправляем файл собеседнику
     try:
+        gender_emoji = "👨" if user.gender == 'male' else "👩"
+        doc_caption = f"📎 {gender_emoji} {user.name}"
         if caption:
-            await context.bot.send_document(
-                chat_id=partner_telegram_id,
-                document=document.file_id,
-                caption=f"📎 {user.name}:\n\n{caption}"
+            doc_caption += f":\n\n{caption}"
+        
+        logger.info(f"Отправка файла: от {user.name} (TG: {user.telegram_id}) к {partner.name} (TG: {partner.telegram_id})")
+        await context.bot.send_document(
+            chat_id=partner.telegram_id,
+            document=document.file_id,
+            caption=doc_caption,
+            reply_markup=reply_markup
+        )
+        logger.info(f"Файл успешно отправлен от {user.name} к {partner.name}")
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Ошибка при отправке файла от {user.name} (TG: {user.telegram_id}) к {partner.name} (TG: {partner.telegram_id}): {e}")
+        if "chat not found" in error_msg.lower() or "user not found" in error_msg.lower():
+            await update.message.reply_text(
+                f"❌ Не удалось отправить файл.\n"
+                f"Пользователь не найден или заблокировал бота."
             )
         else:
-            await context.bot.send_document(
-                chat_id=partner_telegram_id,
-                document=document.file_id,
-                caption=f"📎 {user.name}"
+            await update.message.reply_text(
+                f"❌ Не удалось отправить файл.\n"
+                f"Ошибка: {error_msg}"
             )
-        await update.message.reply_text("✅ Файл отправлен")
     except Exception as e:
         logger.error(f"Ошибка при отправке файла: {e}")
         await update.message.reply_text(
@@ -840,7 +1230,7 @@ def main():
         states={
             GENDER: [CallbackQueryHandler(gender_callback, pattern='^gender_')],
             NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_handler)],
-            BIRTH_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, birth_date_handler)],
+            AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, age_handler)],
             CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, city_handler)],
             DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_handler)],
             PHOTO: [MessageHandler(filters.PHOTO, photo_handler)],
@@ -858,6 +1248,9 @@ def main():
     application.add_handler(CallbackQueryHandler(view_like_callback, pattern='^view_like_'))
     application.add_handler(CallbackQueryHandler(start_chat_callback, pattern='^start_chat_'))
     application.add_handler(CallbackQueryHandler(open_chat_callback, pattern='^open_chat_'))
+    application.add_handler(CallbackQueryHandler(exit_chat_callback, pattern='^exit_current_chat$'))
+    application.add_handler(CallbackQueryHandler(show_all_chats_callback, pattern='^show_all_chats$'))
+    application.add_handler(CallbackQueryHandler(view_partner_callback, pattern='^view_partner_'))
     
     # Обработчики команд
     application.add_handler(CommandHandler('exit', exit_chat))

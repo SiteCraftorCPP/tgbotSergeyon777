@@ -19,7 +19,7 @@ import database as db
 logger = logging.getLogger(__name__)
 
 # Состояния для добавления анкеты админом
-ADMIN_NAME, ADMIN_BIRTH_DATE, ADMIN_CITY, ADMIN_DESCRIPTION, ADMIN_PHOTO = range(5)
+ADMIN_NAME, ADMIN_AGE, ADMIN_CITY, ADMIN_DESCRIPTION, ADMIN_PHOTO = range(5)
 
 
 def is_admin(user_id: int) -> bool:
@@ -84,24 +84,31 @@ async def admin_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data['name'] = name
     
     await update.message.reply_text(
-        f"Отлично! Теперь укажите дату рождения в формате ДД.ММ.ГГГГ:"
+        f"Отлично! Укажите возраст (число):"
     )
-    return ADMIN_BIRTH_DATE
+    return ADMIN_AGE
 
 
-async def admin_birth_date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик даты рождения для админа"""
-    birth_date = update.message.text.strip()
+async def admin_age_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик возраста для админа"""
+    age_text = update.message.text.strip()
     
-    if len(birth_date) != 10 or birth_date.count('.') != 2:
+    try:
+        age = int(age_text)
+        if age < 18 or age > 100:
+            await update.message.reply_text(
+                "❌ Укажите корректный возраст (18-100):"
+            )
+            return ADMIN_AGE
+    except ValueError:
         await update.message.reply_text(
-            "❌ Неверный формат даты. Используйте формат ДД.ММ.ГГГГ"
+            "❌ Введите число (например: 22)"
         )
-        return ADMIN_BIRTH_DATE
+        return ADMIN_AGE
     
-    context.user_data['birth_date'] = birth_date
+    context.user_data['age'] = age
     
-    await update.message.reply_text("Укажите город:")
+    await update.message.reply_text("🏙 Укажите город:")
     return ADMIN_CITY
 
 
@@ -144,7 +151,7 @@ async def admin_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         username="Анкета от админа",
         name=context.user_data['name'],
         gender='female',
-        birth_date=context.user_data['birth_date'],
+        age=context.user_data['age'],
         city=context.user_data['city'],
         description=context.user_data['description'],
         photo_path=file_path
@@ -153,9 +160,8 @@ async def admin_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Показываем созданную анкету
     text = (
         f"✅ Анкета успешно добавлена!\n\n"
-        f"👩 {user.name}\n"
-        f"Дата рождения: {user.birth_date}\n"
-        f"Город: {user.city}\n\n"
+        f"👩 {user.name}, {user.age}\n"
+        f"📍 {user.city}\n\n"
         f"{user.description}"
     )
     
@@ -227,10 +233,9 @@ async def admin_list_profiles_callback(update: Update, context: ContextTypes.DEF
         # Показываем первые 10 анкет
         for profile in female_profiles[:10]:
             text = (
-                f"👩 {profile.name}\n"
+                f"👩 {profile.name}, {profile.age}\n"
                 f"ID: {profile.id}\n"
-                f"Дата рождения: {profile.birth_date}\n"
-                f"Город: {profile.city}\n\n"
+                f"📍 {profile.city}\n\n"
                 f"{profile.description}"
             )
             
@@ -303,7 +308,7 @@ def setup_admin_handlers(application):
         entry_points=[CallbackQueryHandler(admin_add_female_callback, pattern='^admin_add_female$')],
         states={
             ADMIN_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_name_handler)],
-            ADMIN_BIRTH_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_birth_date_handler)],
+            ADMIN_AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_age_handler)],
             ADMIN_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_city_handler)],
             ADMIN_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_description_handler)],
             ADMIN_PHOTO: [MessageHandler(filters.PHOTO, admin_photo_handler)],

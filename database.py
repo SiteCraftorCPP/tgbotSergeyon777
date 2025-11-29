@@ -16,7 +16,7 @@ class User(Base):
     username = Column(String(255), nullable=True)
     name = Column(String(100), nullable=False)  # Имя пользователя
     gender = Column(String(10), nullable=False)  # 'male' или 'female'
-    birth_date = Column(String(50), nullable=False)
+    age = Column(Integer, nullable=False)  # Возраст (просто число)
     city = Column(String(100), nullable=False)
     description = Column(Text, nullable=False)
     photo_path = Column(String(500), nullable=False)
@@ -97,7 +97,7 @@ def get_user_by_telegram_id(telegram_id: int):
         session.close()
 
 
-def create_user(telegram_id: int, username: str, name: str, gender: str, birth_date: str, 
+def create_user(telegram_id: int, username: str, name: str, gender: str, age: int, 
                 city: str, description: str, photo_path: str):
     """Создать нового пользователя"""
     session = get_session()
@@ -107,7 +107,7 @@ def create_user(telegram_id: int, username: str, name: str, gender: str, birth_d
             username=username,
             name=name,
             gender=gender,
-            birth_date=birth_date,
+            age=age,
             city=city,
             description=description,
             photo_path=photo_path
@@ -243,6 +243,57 @@ def get_active_chats(user_id: int):
         ).all()
         
         return likes_sent + likes_received
+    finally:
+        session.close()
+
+
+def get_unread_count(user_id: int, from_user_id: int):
+    """Получить количество непрочитанных сообщений от конкретного пользователя"""
+    session = get_session()
+    try:
+        count = session.query(Message).filter(
+            Message.to_user_id == user_id,
+            Message.from_user_id == from_user_id,
+            Message.is_read == False
+        ).count()
+        return count
+    finally:
+        session.close()
+
+
+def mark_messages_as_read(user_id: int, from_user_id: int):
+    """Отметить все сообщения от пользователя как прочитанные"""
+    session = get_session()
+    try:
+        session.query(Message).filter(
+            Message.to_user_id == user_id,
+            Message.from_user_id == from_user_id,
+            Message.is_read == False
+        ).update({Message.is_read: True})
+        session.commit()
+    finally:
+        session.close()
+
+
+def get_last_message(user1_id: int, user2_id: int):
+    """Получить последнее сообщение между двумя пользователями"""
+    session = get_session()
+    try:
+        message = session.query(Message).filter(
+            ((Message.from_user_id == user1_id) & (Message.to_user_id == user2_id)) |
+            ((Message.from_user_id == user2_id) & (Message.to_user_id == user1_id))
+        ).order_by(Message.created_at.desc()).first()
+        return message
+    finally:
+        session.close()
+
+
+def get_user_by_id(user_id: int):
+    """Получить пользователя по ID"""
+    session = get_session()
+    try:
+        user = session.query(User).filter_by(id=user_id).first()
+        return user
     finally:
         session.close()
 

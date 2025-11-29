@@ -28,3 +28,4 @@ echo "1. Создайте файл .env с BOT_TOKEN и ADMIN_IDS"
 echo "2. Установите зависимости: pip3 install -r requirements.txt"
 echo "3. Запустите бота: python3 bot.py"
 
+
