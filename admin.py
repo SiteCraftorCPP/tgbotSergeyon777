@@ -43,6 +43,7 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("➕ Добавить женскую анкету", callback_data='admin_add_female')],
         [InlineKeyboardButton("📊 Статистика", callback_data='admin_stats')],
+        [InlineKeyboardButton("❤️ Статистика лайков", callback_data='admin_likes_stats')],
         [InlineKeyboardButton(f"👥 Список анкет (👨 {male_count} | 👩 {female_count})", callback_data='admin_list_profiles')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -165,9 +166,11 @@ async def admin_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     
     # Показываем созданную анкету
+    hashtag_str = user.hashtag if user.hashtag else "—"
     text = (
         f"✅ Анкета успешно добавлена!\n\n"
         f"👩 {user.name}, {user.age}\n"
+        f"🏷 Код: {hashtag_str}\n"
         f"📍 {user.city}\n\n"
         f"{user.description}"
     )
@@ -217,8 +220,42 @@ async def admin_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         session.close()
 
 
+async def admin_likes_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать статистику лайков по женским анкетам"""
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("У вас нет прав доступа.")
+        return
+    
+    # Получаем статистику лайков
+    stats = db.get_likes_stats_by_female()
+    
+    if not stats:
+        await query.message.reply_text(
+            "❤️ Статистика лайков\n\n"
+            "Пока нет данных о лайках."
+        )
+        return
+    
+    # Формируем текст статистики
+    text = "❤️ Статистика лайков\n\n"
+    
+    # Показываем все анкеты, отсортированные по количеству лайков (по убыванию)
+    for i, stat in enumerate(stats, 1):
+        user_id, name, age, hashtag, likes_count = stat
+        hashtag_str = hashtag if hashtag else "—"
+        
+        text += f"{i}. 👩 {name}, {age}\n"
+        text += f"   🏷 Код: {hashtag_str}\n"
+        text += f"   ❤️ Лайков: {likes_count}\n\n"
+    
+    await query.message.reply_text(text)
+
+
 async def admin_list_profiles_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать список всех анкет"""
+    """Показать список фейковых анкет (созданных админом)"""
     query = update.callback_query
     await query.answer()
     
@@ -228,18 +265,29 @@ async def admin_list_profiles_callback(update: Update, context: ContextTypes.DEF
     
     session = db.get_session()
     try:
-        # Получаем женские анкеты
-        female_profiles = session.query(db.User).filter_by(gender='female').all()
+        # Получаем только фейковые женские анкеты (созданные админом - username == "Анкета от админа")
+        fake_profiles = session.query(db.User).filter(
+            db.User.gender == 'female',
+            db.User.username == 'Анкета от админа'
+        ).all()
+        
+        if not fake_profiles:
+            await query.message.reply_text(
+                "👩 Женские анкеты (фейк) 0\n\n"
+                "Нет фейковых анкет."
+            )
+            return
         
         await query.message.reply_text(
-            f"👩 Женских анкет в базе: {len(female_profiles)}\n\n"
-            f"Отправляю первые 10 анкет..."
+            f"👩 Женские анкеты (фейк) {len(fake_profiles)}"
         )
         
-        # Показываем первые 10 анкет
-        for profile in female_profiles[:10]:
+        # Показываем все фейковые анкеты
+        for profile in fake_profiles:
+            hashtag_str = profile.hashtag if profile.hashtag else "—"
             text = (
                 f"👩 {profile.name}, {profile.age}\n"
+                f"🏷 Код: {hashtag_str}\n"
                 f"ID: {profile.id}\n"
                 f"📍 {profile.city}\n\n"
                 f"{profile.description}"
@@ -325,6 +373,7 @@ def setup_admin_handlers(application):
     application.add_handler(CommandHandler('admin', admin_menu))
     application.add_handler(admin_conv_handler)
     application.add_handler(CallbackQueryHandler(admin_stats_callback, pattern='^admin_stats$'))
+    application.add_handler(CallbackQueryHandler(admin_likes_stats_callback, pattern='^admin_likes_stats$'))
     application.add_handler(CallbackQueryHandler(admin_list_profiles_callback, pattern='^admin_list_profiles$'))
     application.add_handler(CallbackQueryHandler(admin_delete_profile_callback, pattern='^admin_delete_'))
 

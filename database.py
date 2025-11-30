@@ -5,6 +5,8 @@ from datetime import datetime
 import config
 from functools import lru_cache
 import threading
+import random
+import string
 
 Base = declarative_base()
 
@@ -26,6 +28,7 @@ class User(Base):
     city = Column(String(100), nullable=False)
     description = Column(Text, nullable=False)
     photo_path = Column(String(500), nullable=False)
+    hashtag = Column(String(20), unique=True, nullable=True, index=True)  # Уникальный код для женских анкет
     registered_at = Column(DateTime, default=datetime.now)
     is_active = Column(Boolean, default=True, index=True)  # Индекс для фильтрации активных
     
@@ -38,6 +41,7 @@ class User(Base):
     # Составной индекс для частых запросов
     __table_args__ = (
         Index('idx_gender_active', 'gender', 'is_active'),
+        Index('idx_hashtag', 'hashtag'),
     )
     
 
@@ -136,6 +140,24 @@ def get_session():
     return Session()
 
 
+def generate_unique_hashtag():
+    """Генерировать уникальный хэштэг для женской анкеты"""
+    session = get_session()
+    try:
+        while True:
+            # Генерируем хэштэг формата: 3 буквы + 4 цифры (например: ABC1234)
+            letters = ''.join(random.choices(string.ascii_uppercase, k=3))
+            numbers = ''.join(random.choices(string.digits, k=4))
+            hashtag = f"#{letters}{numbers}"
+            
+            # Проверяем уникальность
+            existing = session.query(User).filter_by(hashtag=hashtag).first()
+            if not existing:
+                return hashtag
+    finally:
+        session.close()
+
+
 def get_user_by_telegram_id(telegram_id: int):
     """Получить пользователя по Telegram ID (с кэшированием)"""
     # Проверяем кэш
@@ -169,6 +191,11 @@ def create_user(telegram_id: int, username: str, name: str, gender: str, age: in
     """Создать нового пользователя"""
     session = get_session()
     try:
+        # Генерируем хэштэг только для женских анкет
+        hashtag = None
+        if gender == 'female':
+            hashtag = generate_unique_hashtag()
+        
         user = User(
             telegram_id=telegram_id,
             username=username,
@@ -177,7 +204,8 @@ def create_user(telegram_id: int, username: str, name: str, gender: str, age: in
             age=age,
             city=city,
             description=description,
-            photo_path=photo_path
+            photo_path=photo_path,
+            hashtag=hashtag
         )
         session.add(user)
         session.commit()
@@ -383,6 +411,45 @@ def get_user_by_id(user_id: int):
             with _cache_lock:
                 _user_cache[user.telegram_id] = user
         return user
+    finally:
+        session.close()
+
+
+def get_user_by_hashtag(hashtag: str):
+    """Получить пользователя по хэштэгу"""
+    session = get_session()
+    try:
+        # Добавляем # если его нет
+        if not hashtag.startswith('#'):
+            hashtag = '#' + hashtag
+        
+        user = session.query(User).filter_by(hashtag=hashtag, is_active=True).first()
+        return user
+    finally:
+        session.close()
+
+
+def get_likes_stats_by_female():
+    """Получить статистику лайков по женским анкетам (количество уникальных мужчин, поставивших лайк)"""
+    session = get_session()
+    try:
+        # Получаем все женские анкеты с количеством лайков от разных мужчин
+        # В системе один мужчина может поставить только один лайк одной девушке,
+        # поэтому count(Like.id) даёт количество уникальных мужчин
+        stats = session.query(
+            User.id,
+            User.name,
+            User.age,
+            User.hashtag,
+            func.count(Like.id).label('likes_count')
+        ).outerjoin(
+            Like, User.id == Like.to_user_id
+        ).filter(
+            User.gender == 'female',
+            User.is_active == True
+        ).group_by(User.id).order_by(func.count(Like.id).desc()).all()
+        
+        return stats
     finally:
         session.close()
 

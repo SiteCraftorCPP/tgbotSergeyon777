@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 # Состояния для ConversationHandler
 GENDER, NAME, AGE, CITY, DESCRIPTION, PHOTO = range(6)
 CHAT_MODE = 100
+HASHTAG_SEARCH = 101  # Состояние для поиска по хэштэгу
 
 # Словарь для хранения активных чатов {telegram_id: chat_user_id}
 user_chats = {}
@@ -230,15 +231,24 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.gender == 'male':
         keyboard = [
             [KeyboardButton("🔍 Смотреть анкеты")],
+            [KeyboardButton("🔍 Поиск по коду")],
             [KeyboardButton("💬 Мои чаты")],
             [KeyboardButton("👤 Моя анкета")]
         ]
+        welcome_text = "✅ Регистрация завершена!\nВаша анкета сохранена."
     else:
         keyboard = [
             [KeyboardButton("❤️ Уведомления о симпатиях")],
             [KeyboardButton("💬 Мои чаты")],
             [KeyboardButton("👤 Моя анкета")]
         ]
+        # Показываем хэштэг для женщин
+        welcome_text = (
+            f"✅ Регистрация завершена!\n"
+            f"Ваша анкета сохранена.\n\n"
+            f"🏷 Ваш уникальный код: {user.hashtag}\n"
+            f"Мужчины могут найти вас по этому коду!"
+        )
     
     # Добавляем кнопку админ панели, если пользователь админ
     if is_admin(update.effective_user.id):
@@ -247,8 +257,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(
-        "✅ Регистрация завершена!\n"
-        "Ваша анкета сохранена.",
+        welcome_text,
         reply_markup=reply_markup
     )
     
@@ -259,6 +268,7 @@ async def show_main_menu_male(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Показать главное меню для мужчин"""
     keyboard = [
         [KeyboardButton("🔍 Смотреть анкеты")],
+        [KeyboardButton("🔍 Поиск по коду")],
         [KeyboardButton("💬 Мои чаты")],
         [KeyboardButton("👤 Моя анкета")]
     ]
@@ -843,6 +853,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Список кнопок меню - если текст является кнопкой меню, обрабатываем как команду, а не отправляем в чат
     menu_buttons = [
         "🔍 Смотреть анкеты",
+        "🔍 Поиск по коду",
         "💬 Мои чаты",
         "❤️ Уведомления о симпатиях",
         "👤 Моя анкета",
@@ -852,9 +863,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Если это кнопка меню - обрабатываем как команду меню, не отправляем в чат
     if text in menu_buttons:
         logger.info(f"Пользователь {user.name} нажал кнопку меню: {text}")
+        # Выходим из режима поиска по хэштэгу при нажатии любой кнопки меню
+        hashtag_search_mode.pop(update.effective_user.id, None)
+        
         # Обработка кнопок меню
         if text == "🔍 Смотреть анкеты":
             await browse_profiles(update, context)
+        elif text == "🔍 Поиск по коду":
+            await start_hashtag_search(update, context)
         elif text == "💬 Мои чаты":
             await show_chats(update, context)
         elif text == "❤️ Уведомления о симпатиях":
@@ -863,6 +879,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_my_profile(update, context)
         elif text == "🔧 Админ панель":
             await admin.admin_menu(update, context)
+        return
+    
+    # Проверяем, находится ли пользователь в режиме поиска по хэштэгу
+    if update.effective_user.id in hashtag_search_mode:
+        await process_hashtag_search(update, context)
         return
     
     # Проверяем, находится ли пользователь в режиме чата
@@ -952,6 +973,10 @@ async def show_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📍 {user.city}\n\n"
         f"{user.description}"
     )
+    
+    # Для женщин показываем их уникальный код
+    if user.gender == 'female' and user.hashtag:
+        text += f"\n\n🏷 Ваш уникальный код: {user.hashtag}\nМужчины могут найти вас по этому коду!"
     
     try:
         with open(user.photo_path, 'rb') as photo:
@@ -1231,6 +1256,126 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ========== Поиск по хэштэгу ==========
+
+# Словарь для хранения состояния поиска по хэштэгу
+hashtag_search_mode = {}
+
+
+async def start_hashtag_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начать поиск по хэштэгу"""
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    
+    if not user:
+        await update.message.reply_text("❌ Вы не зарегистрированы. Отправьте /start")
+        return
+    
+    if user.gender != 'male':
+        await update.message.reply_text("🔍 Эта функция доступна только для мужчин.")
+        return
+    
+    # Включаем режим поиска по хэштэгу
+    hashtag_search_mode[update.effective_user.id] = True
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data='cancel_hashtag_search')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "🔍 Поиск по уникальному коду\n\n"
+        "Введите код анкеты (например: #ABC1234):\n\n"
+        "💡 Девушки могут поделиться своим кодом, "
+        "чтобы вы нашли их анкету напрямую.",
+        reply_markup=reply_markup
+    )
+
+
+async def process_hashtag_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработать введенный хэштэг"""
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    hashtag = update.message.text.strip().upper()
+    
+    # Добавляем # если пользователь не ввел
+    if not hashtag.startswith('#'):
+        hashtag = '#' + hashtag
+    
+    # Выходим из режима поиска
+    hashtag_search_mode.pop(update.effective_user.id, None)
+    
+    # Ищем анкету по хэштэгу
+    profile = db.get_user_by_hashtag(hashtag)
+    
+    if not profile:
+        await update.message.reply_text(
+            f"❌ Анкета с кодом {hashtag} не найдена.\n\n"
+            f"Проверьте правильность кода и попробуйте снова."
+        )
+        return
+    
+    if profile.gender != 'female':
+        await update.message.reply_text("❌ По этому коду анкета не найдена.")
+        return
+    
+    # Проверяем, не лайкнул ли уже
+    session = db.get_session()
+    try:
+        existing_like = session.query(db.Like).filter_by(
+            from_user_id=user.id, 
+            to_user_id=profile.id
+        ).first()
+        
+        if existing_like:
+            if existing_like.chat_started:
+                await update.message.reply_text(
+                    f"💬 Вы уже начали диалог с {profile.name}!\n"
+                    f"Перейдите в '💬 Мои чаты' для общения."
+                )
+            else:
+                await update.message.reply_text(
+                    f"❤️ Вы уже отправили симпатию {profile.name}!\n"
+                    f"Ожидайте ответа."
+                )
+            return
+    finally:
+        session.close()
+    
+    # Показываем анкету
+    text = (
+        f"🔍 Найдена анкета по коду {hashtag}:\n\n"
+        f"👩 {profile.name}, {profile.age}\n"
+        f"📍 {profile.city}\n\n"
+        f"{profile.description}"
+    )
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("❤️ Нравится", callback_data=f'like_{profile.id}'),
+            InlineKeyboardButton("👎 Пропустить", callback_data=f'dislike_{profile.id}')
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    try:
+        with open(profile.photo_path, 'rb') as photo:
+            await update.message.reply_photo(
+                photo=photo,
+                caption=text,
+                reply_markup=reply_markup
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке фото: {e}")
+        await update.message.reply_text(text, reply_markup=reply_markup)
+
+
+async def cancel_hashtag_search_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена поиска по хэштэгу"""
+    query = update.callback_query
+    await query.answer()
+    
+    hashtag_search_mode.pop(update.effective_user.id, None)
+    
+    await query.edit_message_text("❌ Поиск отменен.")
+
+
 def main():
     """Запуск бота"""
     # Проверка токена
@@ -1284,6 +1429,7 @@ def main():
     application.add_handler(CallbackQueryHandler(exit_chat_callback, pattern='^exit_current_chat$'))
     application.add_handler(CallbackQueryHandler(show_all_chats_callback, pattern='^show_all_chats$'))
     application.add_handler(CallbackQueryHandler(view_partner_callback, pattern='^view_partner_'))
+    application.add_handler(CallbackQueryHandler(cancel_hashtag_search_callback, pattern='^cancel_hashtag_search$'))
     
     # Обработчики команд
     application.add_handler(CommandHandler('exit', exit_chat))
