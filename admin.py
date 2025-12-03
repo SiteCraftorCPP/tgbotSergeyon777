@@ -15,6 +15,7 @@ from telegram.ext import (
 
 import config
 import database as db
+import payments
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,8 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("➕ Добавить женскую анкету", callback_data='admin_add_female')],
         [InlineKeyboardButton("📊 Статистика", callback_data='admin_stats')],
         [InlineKeyboardButton("❤️ Статистика лайков", callback_data='admin_likes_stats')],
-        [InlineKeyboardButton(f"👥 Список анкет (👨 {male_count} | 👩 {female_count})", callback_data='admin_list_profiles')]
+        [InlineKeyboardButton(f"👥 Список анкет (👨 {male_count} | 👩 {female_count})", callback_data='admin_list_profiles')],
+        [InlineKeyboardButton("🔗 Ссылка для оплаты", callback_data='admin_payment_link')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -354,6 +356,97 @@ async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def admin_payment_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать выбор анкеты для генерации ссылки на оплату"""
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("У вас нет прав доступа.")
+        return
+    
+    session = db.get_session()
+    try:
+        # Получаем все женские анкеты (созданные админом)
+        female_profiles = session.query(db.User).filter(
+            db.User.gender == 'female',
+            db.User.is_active == True
+        ).all()
+        
+        if not female_profiles:
+            await query.message.reply_text(
+                "🔗 Генерация ссылки для оплаты\n\n"
+                "❌ Нет доступных анкет."
+            )
+            return
+        
+        keyboard = []
+        for profile in female_profiles:
+            hashtag_str = profile.hashtag if profile.hashtag else "—"
+            button_text = f"👩 {profile.name}, {profile.age} ({hashtag_str})"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f'gen_link_{profile.id}')])
+        
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data='admin_cancel_link')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.message.reply_text(
+            "🔗 Генерация ссылки для оплаты\n\n"
+            "Выберите анкету, для которой нужно создать ссылку:\n\n"
+            "💡 Эту ссылку можно отправить клиенту, чтобы он сам указал сумму и оплатил.",
+            reply_markup=reply_markup
+        )
+    finally:
+        session.close()
+
+
+async def generate_payment_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сгенерировать ссылку на оплату для выбранной анкеты"""
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("У вас нет прав доступа.")
+        return
+    
+    profile_id = int(query.data.split('_')[2])
+    
+    # Получаем информацию о профиле
+    profile = db.get_user_by_id(profile_id)
+    if not profile:
+        await query.message.reply_text("❌ Анкета не найдена.")
+        return
+    
+    # Генерируем ссылку
+    # Получаем имя бота из токена или используем заглушку
+    try:
+        bot_info = await context.bot.get_me()
+        bot_username = bot_info.username
+    except:
+        bot_username = "dating_bot"
+    
+    payment_link = f"https://t.me/{bot_username}?start=donate_{profile_id}"
+    
+    hashtag_str = profile.hashtag if profile.hashtag else "—"
+    
+    await query.message.reply_text(
+        f"🔗 Ссылка для оплаты\n\n"
+        f"👩 Анкета: {profile.name}, {profile.age}\n"
+        f"🏷 Код: {hashtag_str}\n\n"
+        f"📎 Ссылка для клиента:\n"
+        f"`{payment_link}`\n\n"
+        f"💡 Отправьте эту ссылку клиенту. Он перейдёт по ней, "
+        f"укажет сумму и сможет оплатить.",
+        parse_mode='Markdown'
+    )
+
+
+async def admin_cancel_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена генерации ссылки"""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("❌ Генерация ссылки отменена.")
+
+
 def setup_admin_handlers(application):
     """Настройка обработчиков админ панели"""
     
@@ -376,4 +469,9 @@ def setup_admin_handlers(application):
     application.add_handler(CallbackQueryHandler(admin_likes_stats_callback, pattern='^admin_likes_stats$'))
     application.add_handler(CallbackQueryHandler(admin_list_profiles_callback, pattern='^admin_list_profiles$'))
     application.add_handler(CallbackQueryHandler(admin_delete_profile_callback, pattern='^admin_delete_'))
+    
+    # Обработчики для генерации ссылок на оплату
+    application.add_handler(CallbackQueryHandler(admin_payment_link_callback, pattern='^admin_payment_link$'))
+    application.add_handler(CallbackQueryHandler(generate_payment_link_callback, pattern='^gen_link_'))
+    application.add_handler(CallbackQueryHandler(admin_cancel_link_callback, pattern='^admin_cancel_link$'))
 

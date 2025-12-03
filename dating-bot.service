@@ -6,8 +6,8 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root/tgbotSergeyon777
-Environment="PATH=/usr/bin:/usr/local/bin"
-ExecStart=/usr/bin/python3 bot.py
+Environment="PATH=/root/tgbotSergeyon777/venv/bin:/usr/bin:/usr/local/bin"
+ExecStart=/root/tgbotSergeyon777/venv/bin/python3 /root/tgbotSergeyon777/bot.py
 Restart=always
 RestartSec=10
 StandardOutput=append:/var/log/dating-bot.log

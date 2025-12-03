@@ -15,6 +15,7 @@ from telegram.constants import ParseMode
 import config
 import database as db
 import admin
+import payments
 from admin import is_admin
 
 # Настройка логирования
@@ -47,6 +48,10 @@ logger = logging.getLogger(__name__)
 GENDER, NAME, AGE, CITY, DESCRIPTION, PHOTO = range(6)
 CHAT_MODE = 100
 HASHTAG_SEARCH = 101  # Состояние для поиска по хэштэгу
+DONATION_AMOUNT = 102  # Состояние для ввода суммы доната
+
+# Словарь для хранения получателя доната {telegram_id: recipient_user_id}
+pending_donations = {}
 
 # Словарь для хранения активных чатов {telegram_id: chat_user_id}
 user_chats = {}
@@ -72,6 +77,29 @@ async def check_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user = db.get_user_by_telegram_id(update.effective_user.id)
+    
+    # Проверяем аргументы команды (для deep links)
+    args = context.args
+    if args and len(args) > 0:
+        arg = args[0]
+        
+        # Обработка ссылки для доната
+        if arg.startswith('donate_'):
+            try:
+                recipient_id = int(arg.replace('donate_', ''))
+                await handle_donation_start(update, context, recipient_id)
+                return ConversationHandler.END
+            except ValueError:
+                pass
+        
+        # Обработка проверки статуса платежа
+        if arg.startswith('payment_'):
+            try:
+                payment_id = arg.replace('payment_', '')
+                await check_payment_callback_from_link(update, context, payment_id)
+                return ConversationHandler.END
+            except:
+                pass
     
     # Проверяем, был ли пользователь в процессе регистрации
     was_in_registration = bool(context.user_data)
@@ -270,7 +298,8 @@ async def show_main_menu_male(update: Update, context: ContextTypes.DEFAULT_TYPE
         [KeyboardButton("🔍 Смотреть анкеты")],
         [KeyboardButton("🔍 Поиск по коду")],
         [KeyboardButton("💬 Мои чаты")],
-        [KeyboardButton("👤 Моя анкета")]
+        [KeyboardButton("👤 Моя анкета")],
+        [KeyboardButton("💎 Подписка")]
     ]
     
     # Добавляем кнопку админ панели, если пользователь админ
@@ -471,14 +500,36 @@ async def start_chat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         from_user = session.query(db.User).filter_by(id=like.from_user_id).first()
         to_user = session.query(db.User).filter_by(id=like.to_user_id).first()
         
-        # Уведомляем мужчину
+        # Уведомляем мужчину - проверяем подписку
         try:
             logger.info(f"Отправка уведомления о начале чата: от девушки {to_user.name} (TG: {to_user.telegram_id}) к мужчине {from_user.name} (TG: {from_user.telegram_id})")
-            await context.bot.send_message(
-                chat_id=from_user.telegram_id,
-                text=f"💬 Отличные новости!\n\nДевушка хочет начать с вами диалог.\n"
-                     f"Перейдите в '💬 Мои чаты' чтобы начать общение."
-            )
+            
+            # Проверяем подписку мужчины
+            has_subscription = db.has_active_subscription(from_user.id)
+            
+            if has_subscription:
+                # С подпиской - полный доступ
+                await context.bot.send_message(
+                    chat_id=from_user.telegram_id,
+                    text=f"💬 Отличные новости!\n\nДевушка хочет начать с вами диалог.\n"
+                         f"Перейдите в '💬 Мои чаты' чтобы начать общение."
+                )
+            else:
+                # Без подписки - показываем уведомление с предложением купить
+                keyboard = [
+                    [InlineKeyboardButton("💎 Получить Premium доступ", callback_data='buy_subscription')]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await context.bot.send_message(
+                    chat_id=from_user.telegram_id,
+                    text=f"💕 У вас взаимная симпатия!\n\n"
+                         f"Девушка хочет начать с вами диалог, но чтобы "
+                         f"узнать кто это и начать общение, нужен Premium доступ.\n\n"
+                         f"💎 Откройте возможности Premium!",
+                    reply_markup=reply_markup
+                )
+            
             logger.info(f"Уведомление успешно отправлено мужчине {from_user.name} (TG: {from_user.telegram_id})")
         except Exception as e:
             logger.error(f"Ошибка при отправке уведомления мужчине {from_user.name} (TG: {from_user.telegram_id}): {e}")
@@ -628,6 +679,27 @@ async def open_chat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     chat_user_id = int(query.data.split('_')[2])
     user = db.get_user_by_telegram_id(update.effective_user.id)
+    
+    # Проверяем подписку для мужчин
+    if user.gender == 'male':
+        has_subscription = db.has_active_subscription(user.id)
+        if not has_subscription:
+            # Без подписки нельзя открыть чат
+            keyboard = [
+                [InlineKeyboardButton("💎 Получить Premium доступ", callback_data='buy_subscription')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.message.reply_text(
+                "🔒 Для доступа к чатам нужен Premium\n\n"
+                "С Premium вы сможете:\n"
+                "• Видеть кто вас лайкнул\n"
+                "• Начинать диалоги с девушками\n"
+                "• Общаться без ограничений\n\n"
+                "💎 Откройте Premium прямо сейчас!",
+                reply_markup=reply_markup
+            )
+            return
     
     # Получаем информацию о собеседнике
     chat_partner = db.get_user_by_id(chat_user_id)
@@ -857,6 +929,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💬 Мои чаты",
         "❤️ Уведомления о симпатиях",
         "👤 Моя анкета",
+        "💎 Подписка",
         "🔧 Админ панель"
     ]
     
@@ -877,6 +950,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_notifications(update, context)
         elif text == "👤 Моя анкета":
             await show_my_profile(update, context)
+        elif text == "💎 Подписка":
+            await show_subscription_info(update, context)
         elif text == "🔧 Админ панель":
             await admin.admin_menu(update, context)
         return
@@ -885,6 +960,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id in hashtag_search_mode:
         await process_hashtag_search(update, context)
         return
+    
+    # Проверяем, находится ли пользователь в режиме ввода суммы доната
+    if update.effective_user.id in pending_donations:
+        if await process_donation_amount(update, context):
+            return
     
     # Проверяем, находится ли пользователь в режиме чата
     if update.effective_user.id in user_chats:
@@ -1376,6 +1456,393 @@ async def cancel_hashtag_search_callback(update: Update, context: ContextTypes.D
     await query.edit_message_text("❌ Поиск отменен.")
 
 
+# ========== Платежи и подписки ==========
+
+async def show_subscription_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать информацию о подписке"""
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    
+    if not user:
+        await update.message.reply_text("❌ Вы не зарегистрированы. Отправьте /start")
+        return
+    
+    sub_info = db.get_subscription_info(user.id)
+    
+    if sub_info['active']:
+        # Есть активная подписка
+        sub_type = "Пробная (1 день)" if sub_info['type'] == 'trial' else "Месячная"
+        expires = sub_info['expires_at'].strftime('%d.%m.%Y %H:%M')
+        
+        text = (
+            f"💎 Ваша подписка Premium\n\n"
+            f"📋 Тип: {sub_type}\n"
+            f"⏰ Действует до: {expires}\n"
+            f"📅 Осталось: {sub_info['days_remaining']} дн. {sub_info['hours_remaining']} ч.\n\n"
+            f"✅ Вам доступны все функции!"
+        )
+        
+        keyboard = []
+        # Если подписка скоро закончится, предлагаем продлить
+        if sub_info['days_remaining'] < 3:
+            keyboard.append([InlineKeyboardButton("🔄 Продлить подписку", callback_data='buy_subscription')])
+        
+        if keyboard:
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(text, reply_markup=reply_markup)
+        else:
+            await update.message.reply_text(text)
+    else:
+        # Нет активной подписки
+        had_trial = sub_info.get('had_trial', False)
+        
+        if had_trial:
+            # Уже была пробная подписка - только месячная
+            text = (
+                f"💎 Premium подписка\n\n"
+                f"Ваша пробная подписка закончилась.\n\n"
+                f"С Premium вы сможете:\n"
+                f"• Видеть кто вас лайкнул\n"
+                f"• Начинать диалоги с девушками\n"
+                f"• Общаться без ограничений\n\n"
+                f"💰 Подписка на месяц: {config.SUBSCRIPTION_PRICE_1_MONTH}₽"
+            )
+            keyboard = [
+                [InlineKeyboardButton(f"💎 Купить за {config.SUBSCRIPTION_PRICE_1_MONTH}₽/мес", callback_data='pay_monthly')]
+            ]
+        else:
+            # Ещё не было пробной подписки
+            text = (
+                f"💎 Premium подписка\n\n"
+                f"С Premium вы сможете:\n"
+                f"• Видеть кто вас лайкнул\n"
+                f"• Начинать диалоги с девушками\n"
+                f"• Общаться без ограничений\n\n"
+                f"🎁 Попробуйте на 1 день за {config.SUBSCRIPTION_PRICE_1_DAY}₽!\n"
+                f"💰 Или сразу на месяц: {config.SUBSCRIPTION_PRICE_1_MONTH}₽"
+            )
+            keyboard = [
+                [InlineKeyboardButton(f"🎁 Попробовать за {config.SUBSCRIPTION_PRICE_1_DAY}₽", callback_data='pay_trial')],
+                [InlineKeyboardButton(f"💎 Месяц за {config.SUBSCRIPTION_PRICE_1_MONTH}₽", callback_data='pay_monthly')]
+            ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(text, reply_markup=reply_markup)
+
+
+async def buy_subscription_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать варианты покупки подписки"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    if not user:
+        await query.message.reply_text("❌ Вы не зарегистрированы. Отправьте /start")
+        return
+    
+    had_trial = db.had_trial_subscription(user.id)
+    
+    if had_trial:
+        # Уже была пробная подписка - только месячная
+        text = (
+            f"💎 Premium подписка\n\n"
+            f"С Premium вы сможете:\n"
+            f"• Видеть кто вас лайкнул\n"
+            f"• Начинать диалоги с девушками\n"
+            f"• Общаться без ограничений\n\n"
+            f"💰 Подписка на месяц: {config.SUBSCRIPTION_PRICE_1_MONTH}₽"
+        )
+        keyboard = [
+            [InlineKeyboardButton(f"💎 Купить за {config.SUBSCRIPTION_PRICE_1_MONTH}₽/мес", callback_data='pay_monthly')]
+        ]
+    else:
+        # Ещё не было пробной подписки
+        text = (
+            f"💎 Premium подписка\n\n"
+            f"С Premium вы сможете:\n"
+            f"• Видеть кто вас лайкнул\n"
+            f"• Начинать диалоги с девушками\n"
+            f"• Общаться без ограничений\n\n"
+            f"🎁 Попробуйте на 1 день всего за {config.SUBSCRIPTION_PRICE_1_DAY}₽!\n"
+            f"💰 Или сразу на месяц: {config.SUBSCRIPTION_PRICE_1_MONTH}₽"
+        )
+        keyboard = [
+            [InlineKeyboardButton(f"🎁 Попробовать за {config.SUBSCRIPTION_PRICE_1_DAY}₽", callback_data='pay_trial')],
+            [InlineKeyboardButton(f"💎 Месяц за {config.SUBSCRIPTION_PRICE_1_MONTH}₽", callback_data='pay_monthly')]
+        ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.reply_text(text, reply_markup=reply_markup)
+
+
+async def pay_subscription_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик покупки подписки"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    if not user:
+        await query.message.reply_text("❌ Вы не зарегистрированы. Отправьте /start")
+        return
+    
+    subscription_type = 'trial' if query.data == 'pay_trial' else 'monthly'
+    
+    # Проверяем, может ли пользователь купить пробную подписку
+    if subscription_type == 'trial' and db.had_trial_subscription(user.id):
+        await query.message.reply_text(
+            "❌ Вы уже использовали пробную подписку.\n"
+            "Доступна только месячная подписка."
+        )
+        return
+    
+    # Создаём платёж
+    result = payments.create_subscription_payment(user.id, user.telegram_id, subscription_type)
+    
+    if result['success']:
+        price = config.SUBSCRIPTION_PRICE_1_DAY if subscription_type == 'trial' else config.SUBSCRIPTION_PRICE_1_MONTH
+        period = "1 день" if subscription_type == 'trial' else "1 месяц"
+        
+        keyboard = [
+            [InlineKeyboardButton("💳 Оплатить", url=result['payment_url'])],
+            [InlineKeyboardButton("✅ Я оплатил", callback_data=f'check_payment_{result["payment_id"]}')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.message.reply_text(
+            f"💳 Оплата подписки\n\n"
+            f"📋 Тариф: Premium на {period}\n"
+            f"💰 Сумма: {price}₽\n\n"
+            f"Нажмите кнопку 'Оплатить' для перехода на страницу оплаты.\n"
+            f"После оплаты нажмите 'Я оплатил' для активации подписки.",
+            reply_markup=reply_markup
+        )
+    else:
+        await query.message.reply_text(
+            f"❌ Ошибка создания платежа.\n"
+            f"Попробуйте позже или обратитесь в поддержку."
+        )
+
+
+async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверить статус платежа"""
+    query = update.callback_query
+    await query.answer("Проверяем оплату...")
+    
+    payment_id = query.data.replace('check_payment_', '')
+    
+    # Обрабатываем платёж
+    success = payments.process_successful_payment(payment_id)
+    
+    if success:
+        user = db.get_user_by_telegram_id(update.effective_user.id)
+        sub_info = db.get_subscription_info(user.id)
+        
+        if sub_info['active']:
+            expires = sub_info['expires_at'].strftime('%d.%m.%Y %H:%M')
+            await query.message.reply_text(
+                f"✅ Оплата прошла успешно!\n\n"
+                f"💎 Premium подписка активирована!\n"
+                f"⏰ Действует до: {expires}\n\n"
+                f"Теперь вам доступны все функции бота.\n"
+                f"Перейдите в '💬 Мои чаты' чтобы увидеть кто вас лайкнул!"
+            )
+        else:
+            await query.message.reply_text(
+                f"⏳ Платёж обрабатывается...\n\n"
+                f"Попробуйте проверить статус через минуту."
+            )
+    else:
+        # Проверяем статус напрямую
+        payment_info = payments.check_payment_status(payment_id)
+        
+        if payment_info.get('status') == 'pending':
+            await query.message.reply_text(
+                f"⏳ Платёж ещё не завершён.\n\n"
+                f"Пожалуйста, завершите оплату и нажмите 'Я оплатил' снова."
+            )
+        elif payment_info.get('status') == 'canceled':
+            await query.message.reply_text(
+                f"❌ Платёж отменён.\n\n"
+                f"Попробуйте оплатить снова."
+            )
+        else:
+            await query.message.reply_text(
+                f"⏳ Платёж обрабатывается...\n\n"
+                f"Попробуйте проверить статус через минуту."
+            )
+
+
+async def check_payment_callback_from_link(update: Update, context: ContextTypes.DEFAULT_TYPE, payment_id: str):
+    """Проверить статус платежа из ссылки"""
+    success = payments.process_successful_payment(payment_id)
+    
+    if success:
+        user = db.get_user_by_telegram_id(update.effective_user.id)
+        if user:
+            sub_info = db.get_subscription_info(user.id)
+            
+            if sub_info['active']:
+                expires = sub_info['expires_at'].strftime('%d.%m.%Y %H:%M')
+                await update.message.reply_text(
+                    f"✅ Оплата прошла успешно!\n\n"
+                    f"💎 Premium подписка активирована!\n"
+                    f"⏰ Действует до: {expires}\n\n"
+                    f"Теперь вам доступны все функции бота."
+                )
+                return
+    
+    await update.message.reply_text(
+        f"⏳ Проверяем статус платежа...\n\n"
+        f"Если оплата была успешной, подписка скоро активируется."
+    )
+
+
+# ========== Донаты ==========
+
+async def handle_donation_start(update: Update, context: ContextTypes.DEFAULT_TYPE, recipient_id: int):
+    """Начать процесс доната"""
+    recipient = db.get_user_by_id(recipient_id)
+    
+    if not recipient:
+        await update.message.reply_text("❌ Получатель не найден.")
+        return
+    
+    # Сохраняем получателя
+    pending_donations[update.effective_user.id] = recipient_id
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data='cancel_donation')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"💝 Отправка подарка для {recipient.name}\n\n"
+        f"Введите сумму в рублях (минимум 50₽):",
+        reply_markup=reply_markup
+    )
+
+
+async def process_donation_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработать введённую сумму доната"""
+    if update.effective_user.id not in pending_donations:
+        return False
+    
+    try:
+        amount = int(update.message.text.strip())
+        
+        if amount < 50:
+            await update.message.reply_text(
+                "❌ Минимальная сумма — 50₽.\n"
+                "Введите сумму ещё раз:"
+            )
+            return True
+        
+        if amount > 100000:
+            await update.message.reply_text(
+                "❌ Максимальная сумма — 100 000₽.\n"
+                "Введите сумму ещё раз:"
+            )
+            return True
+        
+        recipient_id = pending_donations.pop(update.effective_user.id)
+        recipient = db.get_user_by_id(recipient_id)
+        
+        if not recipient:
+            await update.message.reply_text("❌ Получатель не найден.")
+            return True
+        
+        # Создаём платёж
+        result = payments.create_donation_payment(
+            amount=amount,
+            recipient_user_id=recipient_id,
+            donor_telegram_id=update.effective_user.id
+        )
+        
+        if result['success']:
+            keyboard = [
+                [InlineKeyboardButton("💳 Оплатить", url=result['payment_url'])],
+                [InlineKeyboardButton("✅ Я оплатил", callback_data=f'check_donation_{result["payment_id"]}_{recipient_id}')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                f"💝 Отправка подарка\n\n"
+                f"👤 Получатель: {recipient.name}\n"
+                f"💰 Сумма: {amount}₽\n\n"
+                f"Нажмите 'Оплатить' для перехода на страницу оплаты.",
+                reply_markup=reply_markup
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Ошибка создания платежа.\n"
+                f"Попробуйте позже."
+            )
+        
+        return True
+        
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Введите число.\n"
+            "Например: 100"
+        )
+        return True
+
+
+async def cancel_donation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отменить донат"""
+    query = update.callback_query
+    await query.answer()
+    
+    pending_donations.pop(update.effective_user.id, None)
+    await query.edit_message_text("❌ Отправка подарка отменена.")
+
+
+async def check_donation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверить статус доната"""
+    query = update.callback_query
+    await query.answer("Проверяем оплату...")
+    
+    parts = query.data.split('_')
+    payment_id = parts[2]
+    recipient_id = int(parts[3])
+    
+    # Обрабатываем платёж
+    success = payments.process_successful_payment(payment_id)
+    
+    if success:
+        recipient = db.get_user_by_id(recipient_id)
+        
+        # Уведомляем получателя
+        if recipient:
+            try:
+                payment_info = payments.check_payment_status(payment_id)
+                amount = int(payment_info.get('amount', 0))
+                
+                await context.bot.send_message(
+                    chat_id=recipient.telegram_id,
+                    text=f"💝 Вам пришёл подарок!\n\n"
+                         f"💰 Сумма: {amount}₽\n\n"
+                         f"Деньги поступят на ваш счёт."
+                )
+            except Exception as e:
+                logger.error(f"Ошибка уведомления о донате: {e}")
+        
+        await query.message.reply_text(
+            f"✅ Спасибо за подарок!\n\n"
+            f"💝 {recipient.name if recipient else 'Получатель'} получит уведомление."
+        )
+    else:
+        payment_info = payments.check_payment_status(payment_id)
+        
+        if payment_info.get('status') == 'pending':
+            await query.message.reply_text(
+                f"⏳ Платёж ещё не завершён.\n"
+                f"Пожалуйста, завершите оплату."
+            )
+        else:
+            await query.message.reply_text(
+                f"⏳ Платёж обрабатывается...\n"
+                f"Попробуйте проверить через минуту."
+            )
+
+
 def main():
     """Запуск бота"""
     # Проверка токена
@@ -1430,6 +1897,15 @@ def main():
     application.add_handler(CallbackQueryHandler(show_all_chats_callback, pattern='^show_all_chats$'))
     application.add_handler(CallbackQueryHandler(view_partner_callback, pattern='^view_partner_'))
     application.add_handler(CallbackQueryHandler(cancel_hashtag_search_callback, pattern='^cancel_hashtag_search$'))
+    
+    # Обработчики платежей и подписок
+    application.add_handler(CallbackQueryHandler(buy_subscription_callback, pattern='^buy_subscription$'))
+    application.add_handler(CallbackQueryHandler(pay_subscription_callback, pattern='^pay_(trial|monthly)$'))
+    application.add_handler(CallbackQueryHandler(check_payment_callback, pattern='^check_payment_'))
+    
+    # Обработчики донатов
+    application.add_handler(CallbackQueryHandler(cancel_donation_callback, pattern='^cancel_donation$'))
+    application.add_handler(CallbackQueryHandler(check_donation_callback, pattern='^check_donation_'))
     
     # Обработчики команд
     application.add_handler(CommandHandler('exit', exit_chat))

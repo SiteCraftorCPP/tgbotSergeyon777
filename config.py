@@ -6,6 +6,14 @@ load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 
+# ЮKassa API настройки
+YOOKASSA_SHOP_ID = os.getenv('YOOKASSA_SHOP_ID', '0')
+YOOKASSA_SECRET_KEY = os.getenv('YOOKASSA_SECRET_KEY', 'live_rQivMWcqdtivU4TDbP4w-fyX5mwyFqEQR582FY7HDsM')
+
+# Цены подписок (в рублях)
+SUBSCRIPTION_PRICE_1_DAY = 10  # Пробная подписка на 1 день
+SUBSCRIPTION_PRICE_1_MONTH = 999  # Месячная подписка
+
 # Поддержка нескольких администраторов
 # Можно указать через запятую: ADMIN_IDS=123456789,987654321
 admin_ids_str = os.getenv('ADMIN_IDS', '')

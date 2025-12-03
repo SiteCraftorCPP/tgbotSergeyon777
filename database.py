@@ -105,6 +105,47 @@ class ViewedProfile(Base):
     )
 
 
+class Subscription(Base):
+    """Модель подписки пользователя"""
+    __tablename__ = 'subscriptions'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    subscription_type = Column(String(20), nullable=False)  # 'trial' (1 день) или 'monthly' (месяц)
+    started_at = Column(DateTime, default=datetime.now)
+    expires_at = Column(DateTime, nullable=False)
+    is_active = Column(Boolean, default=True, index=True)
+    
+    # Связи
+    user = relationship('User', backref='subscriptions')
+    
+    # Составной индекс для частых запросов
+    __table_args__ = (
+        Index('idx_user_active_sub', 'user_id', 'is_active'),
+    )
+
+
+class Payment(Base):
+    """Модель платежей"""
+    __tablename__ = 'payments'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)  # Может быть null для донатов
+    payment_id = Column(String(100), unique=True, nullable=False, index=True)  # ID платежа в ЮKassa
+    amount = Column(Integer, nullable=False)  # Сумма в копейках
+    currency = Column(String(10), default='RUB')
+    payment_type = Column(String(30), nullable=False)  # 'subscription_trial', 'subscription_monthly', 'donation'
+    status = Column(String(30), default='pending')  # pending, succeeded, canceled
+    description = Column(String(500), nullable=True)
+    recipient_user_id = Column(Integer, ForeignKey('users.id'), nullable=True)  # Для донатов - кому отправлен
+    created_at = Column(DateTime, default=datetime.now)
+    completed_at = Column(DateTime, nullable=True)
+    
+    # Связи
+    user = relationship('User', foreign_keys=[user_id], backref='payments')
+    recipient = relationship('User', foreign_keys=[recipient_user_id])
+
+
 # Создание движка с оптимизацией для производительности
 # Настройки connection pooling для лучшей производительности
 pool_config = {
@@ -450,6 +491,180 @@ def get_likes_stats_by_female():
         ).group_by(User.id).order_by(func.count(Like.id).desc()).all()
         
         return stats
+    finally:
+        session.close()
+
+
+# ========== Функции для работы с подписками ==========
+
+def get_active_subscription(user_id: int):
+    """Получить активную подписку пользователя"""
+    session = get_session()
+    try:
+        subscription = session.query(Subscription).filter(
+            Subscription.user_id == user_id,
+            Subscription.is_active == True,
+            Subscription.expires_at > datetime.now()
+        ).first()
+        return subscription
+    finally:
+        session.close()
+
+
+def has_active_subscription(user_id: int) -> bool:
+    """Проверить, есть ли у пользователя активная подписка"""
+    return get_active_subscription(user_id) is not None
+
+
+def had_trial_subscription(user_id: int) -> bool:
+    """Проверить, была ли у пользователя пробная подписка"""
+    session = get_session()
+    try:
+        trial = session.query(Subscription).filter(
+            Subscription.user_id == user_id,
+            Subscription.subscription_type == 'trial'
+        ).first()
+        return trial is not None
+    finally:
+        session.close()
+
+
+def create_subscription(user_id: int, subscription_type: str, days: int):
+    """Создать подписку для пользователя"""
+    from datetime import timedelta
+    session = get_session()
+    try:
+        # Деактивируем старые подписки
+        session.query(Subscription).filter(
+            Subscription.user_id == user_id,
+            Subscription.is_active == True
+        ).update({Subscription.is_active: False})
+        
+        # Создаём новую подписку
+        subscription = Subscription(
+            user_id=user_id,
+            subscription_type=subscription_type,
+            started_at=datetime.now(),
+            expires_at=datetime.now() + timedelta(days=days),
+            is_active=True
+        )
+        session.add(subscription)
+        session.commit()
+        session.refresh(subscription)
+        return subscription
+    finally:
+        session.close()
+
+
+def get_subscription_info(user_id: int):
+    """Получить информацию о подписке пользователя для отображения"""
+    session = get_session()
+    try:
+        subscription = session.query(Subscription).filter(
+            Subscription.user_id == user_id,
+            Subscription.is_active == True,
+            Subscription.expires_at > datetime.now()
+        ).first()
+        
+        if subscription:
+            from datetime import timedelta
+            remaining = subscription.expires_at - datetime.now()
+            days = remaining.days
+            hours = remaining.seconds // 3600
+            return {
+                'active': True,
+                'type': subscription.subscription_type,
+                'expires_at': subscription.expires_at,
+                'days_remaining': days,
+                'hours_remaining': hours
+            }
+        
+        # Проверяем, была ли пробная подписка
+        had_trial = session.query(Subscription).filter(
+            Subscription.user_id == user_id,
+            Subscription.subscription_type == 'trial'
+        ).first()
+        
+        return {
+            'active': False,
+            'had_trial': had_trial is not None
+        }
+    finally:
+        session.close()
+
+
+# ========== Функции для работы с платежами ==========
+
+def create_payment(user_id: int, payment_id: str, amount: int, payment_type: str, 
+                   description: str = None, recipient_user_id: int = None):
+    """Создать запись о платеже"""
+    session = get_session()
+    try:
+        payment = Payment(
+            user_id=user_id,
+            payment_id=payment_id,
+            amount=amount,
+            payment_type=payment_type,
+            description=description,
+            recipient_user_id=recipient_user_id,
+            status='pending'
+        )
+        session.add(payment)
+        session.commit()
+        session.refresh(payment)
+        return payment
+    finally:
+        session.close()
+
+
+def update_payment_status(payment_id: str, status: str):
+    """Обновить статус платежа"""
+    session = get_session()
+    try:
+        payment = session.query(Payment).filter_by(payment_id=payment_id).first()
+        if payment:
+            payment.status = status
+            if status == 'succeeded':
+                payment.completed_at = datetime.now()
+            session.commit()
+            return payment
+        return None
+    finally:
+        session.close()
+
+
+def get_payment_by_id(payment_id: str):
+    """Получить платёж по ID"""
+    session = get_session()
+    try:
+        payment = session.query(Payment).filter_by(payment_id=payment_id).first()
+        return payment
+    finally:
+        session.close()
+
+
+def get_user_payments(user_id: int, limit: int = 10):
+    """Получить последние платежи пользователя"""
+    session = get_session()
+    try:
+        payments = session.query(Payment).filter_by(user_id=user_id).order_by(
+            Payment.created_at.desc()
+        ).limit(limit).all()
+        return payments
+    finally:
+        session.close()
+
+
+def get_donations_to_user(recipient_user_id: int):
+    """Получить все донаты, отправленные пользователю"""
+    session = get_session()
+    try:
+        donations = session.query(Payment).filter(
+            Payment.recipient_user_id == recipient_user_id,
+            Payment.payment_type == 'donation',
+            Payment.status == 'succeeded'
+        ).order_by(Payment.created_at.desc()).all()
+        return donations
     finally:
         session.close()
 
