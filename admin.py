@@ -257,7 +257,30 @@ async def admin_likes_stats_callback(update: Update, context: ContextTypes.DEFAU
 
 
 async def admin_list_profiles_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать список фейковых анкет (созданных админом)"""
+    """Показать список всех анкет для управления"""
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("У вас нет прав доступа.")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("👩 Все женские анкеты", callback_data='admin_list_female')],
+        [InlineKeyboardButton("👨 Все мужские анкеты", callback_data='admin_list_male')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='admin_back_to_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.reply_text(
+        "👥 Управление анкетами\n\n"
+        "Выберите категорию:",
+        reply_markup=reply_markup
+    )
+
+
+async def admin_list_female_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать список всех женских анкет"""
     query = update.callback_query
     await query.answer()
     
@@ -267,27 +290,29 @@ async def admin_list_profiles_callback(update: Update, context: ContextTypes.DEF
     
     session = db.get_session()
     try:
-        # Получаем только фейковые женские анкеты (созданные админом - username == "Анкета от админа")
-        fake_profiles = session.query(db.User).filter(
+        # Получаем все женские анкеты
+        profiles = session.query(db.User).filter(
             db.User.gender == 'female',
-            db.User.username == 'Анкета от админа'
+            db.User.is_active == True
         ).all()
         
-        if not fake_profiles:
+        if not profiles:
             await query.message.reply_text(
-                "👩 Женские анкеты (фейк) 0\n\n"
-                "Нет фейковых анкет."
+                "👩 Женские анкеты: 0\n\n"
+                "Нет активных женских анкет."
             )
             return
         
         await query.message.reply_text(
-            f"👩 Женские анкеты (фейк) {len(fake_profiles)}"
+            f"👩 Женские анкеты: {len(profiles)}"
         )
         
-        # Показываем все фейковые анкеты
-        for profile in fake_profiles:
+        # Показываем все анкеты
+        for profile in profiles:
             hashtag_str = profile.hashtag if profile.hashtag else "—"
+            profile_type = "🤖 Фейк" if profile.username == 'Анкета от админа' else "👤 Реальная"
             text = (
+                f"{profile_type}\n"
                 f"👩 {profile.name}, {profile.age}\n"
                 f"🏷 Код: {hashtag_str}\n"
                 f"ID: {profile.id}\n"
@@ -314,8 +339,76 @@ async def admin_list_profiles_callback(update: Update, context: ContextTypes.DEF
         session.close()
 
 
+async def admin_list_male_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать список всех мужских анкет"""
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("У вас нет прав доступа.")
+        return
+    
+    session = db.get_session()
+    try:
+        # Получаем все мужские анкеты
+        profiles = session.query(db.User).filter(
+            db.User.gender == 'male',
+            db.User.is_active == True
+        ).all()
+        
+        if not profiles:
+            await query.message.reply_text(
+                "👨 Мужские анкеты: 0\n\n"
+                "Нет активных мужских анкет."
+            )
+            return
+        
+        await query.message.reply_text(
+            f"👨 Мужские анкеты: {len(profiles)}"
+        )
+        
+        # Показываем все анкеты
+        for profile in profiles:
+            text = (
+                f"👨 {profile.name}, {profile.age}\n"
+                f"ID: {profile.id}\n"
+                f"📍 {profile.city}\n\n"
+                f"{profile.description}"
+            )
+            
+            keyboard = [
+                [InlineKeyboardButton("🗑 Удалить", callback_data=f'admin_delete_{profile.id}')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            try:
+                with open(profile.photo_path, 'rb') as photo:
+                    await query.message.reply_photo(
+                        photo=photo,
+                        caption=text,
+                        reply_markup=reply_markup
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка при отправке фото: {e}")
+                await query.message.reply_text(text, reply_markup=reply_markup)
+    finally:
+        session.close()
+
+
+async def admin_back_to_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Вернуться в админ меню"""
+    query = update.callback_query
+    await query.answer()
+    
+    if not is_admin(update.effective_user.id):
+        await query.message.reply_text("У вас нет прав доступа.")
+        return
+    
+    await admin_menu(update, context)
+
+
 async def admin_delete_profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удалить анкету"""
+    """Полностью удалить анкету"""
     query = update.callback_query
     await query.answer()
     
@@ -325,28 +418,24 @@ async def admin_delete_profile_callback(update: Update, context: ContextTypes.DE
     
     profile_id = int(query.data.split('_')[2])
     
-    session = db.get_session()
-    try:
-        profile = session.query(db.User).filter_by(id=profile_id).first()
-        if profile:
-            # Удаляем фото
-            try:
-                if os.path.exists(profile.photo_path):
-                    os.remove(profile.photo_path)
-            except:
-                pass
-            
-            # Помечаем анкету как неактивную вместо удаления
-            profile.is_active = False
-            session.commit()
-            
-            await query.edit_message_caption(
-                caption=query.message.caption + "\n\n❌ Анкета удалена"
-            )
-        else:
-            await query.message.reply_text("Анкета не найдена.")
-    finally:
-        session.close()
+    # Получаем информацию о профиле перед удалением
+    profile = db.get_user_by_id(profile_id)
+    if not profile:
+        await query.message.reply_text("❌ Анкета не найдена.")
+        return
+    
+    profile_name = profile.name
+    
+    # Полностью удаляем анкету (включая все связанные данные)
+    success = db.delete_user_profile(profile_id)
+    
+    if success:
+        await query.edit_message_caption(
+            caption=query.message.caption + "\n\n🗑 Анкета полностью удалена из базы данных"
+        )
+        logger.info(f"Админ {update.effective_user.id} удалил анкету {profile_name} (ID: {profile_id})")
+    else:
+        await query.message.reply_text("❌ Ошибка при удалении анкеты.")
 
 
 async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -468,6 +557,9 @@ def setup_admin_handlers(application):
     application.add_handler(CallbackQueryHandler(admin_stats_callback, pattern='^admin_stats$'))
     application.add_handler(CallbackQueryHandler(admin_likes_stats_callback, pattern='^admin_likes_stats$'))
     application.add_handler(CallbackQueryHandler(admin_list_profiles_callback, pattern='^admin_list_profiles$'))
+    application.add_handler(CallbackQueryHandler(admin_list_female_callback, pattern='^admin_list_female$'))
+    application.add_handler(CallbackQueryHandler(admin_list_male_callback, pattern='^admin_list_male$'))
+    application.add_handler(CallbackQueryHandler(admin_back_to_menu_callback, pattern='^admin_back_to_menu$'))
     application.add_handler(CallbackQueryHandler(admin_delete_profile_callback, pattern='^admin_delete_'))
     
     # Обработчики для генерации ссылок на оплату

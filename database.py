@@ -668,3 +668,83 @@ def get_donations_to_user(recipient_user_id: int):
     finally:
         session.close()
 
+
+# ========== Функции для редактирования профиля ==========
+
+def update_user_profile(user_id: int, name: str = None, age: int = None, 
+                       city: str = None, description: str = None, photo_path: str = None):
+    """Обновить профиль пользователя"""
+    session = get_session()
+    try:
+        user = session.query(User).filter_by(id=user_id).first()
+        if not user:
+            return False
+        
+        if name is not None:
+            user.name = name
+        if age is not None:
+            user.age = age
+        if city is not None:
+            user.city = city
+        if description is not None:
+            user.description = description
+        if photo_path is not None:
+            user.photo_path = photo_path
+        
+        session.commit()
+        
+        # Обновляем кэш
+        if user.telegram_id:
+            with _cache_lock:
+                _user_cache[user.telegram_id] = user
+        
+        return True
+    finally:
+        session.close()
+
+
+def delete_user_profile(user_id: int):
+    """Полностью удалить профиль пользователя (включая связанные данные)"""
+    session = get_session()
+    try:
+        user = session.query(User).filter_by(id=user_id).first()
+        if not user:
+            return False
+        
+        # Удаляем фото
+        import os
+        try:
+            if os.path.exists(user.photo_path):
+                os.remove(user.photo_path)
+        except:
+            pass
+        
+        # Удаляем связанные данные
+        session.query(Like).filter(
+            (Like.from_user_id == user_id) | (Like.to_user_id == user_id)
+        ).delete()
+        
+        session.query(Message).filter(
+            (Message.from_user_id == user_id) | (Message.to_user_id == user_id)
+        ).delete()
+        
+        session.query(ViewedProfile).filter(
+            (ViewedProfile.user_id == user_id) | (ViewedProfile.viewed_user_id == user_id)
+        ).delete()
+        
+        session.query(Subscription).filter_by(user_id=user_id).delete()
+        session.query(Payment).filter_by(user_id=user_id).delete()
+        
+        # Удаляем пользователя
+        session.delete(user)
+        session.commit()
+        
+        # Удаляем из кэша
+        if user.telegram_id:
+            with _cache_lock:
+                _user_cache.pop(user.telegram_id, None)
+        
+        return True
+    finally:
+        session.close()
+

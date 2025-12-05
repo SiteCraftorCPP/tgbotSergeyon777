@@ -50,6 +50,9 @@ CHAT_MODE = 100
 HASHTAG_SEARCH = 101  # Состояние для поиска по хэштэгу
 DONATION_AMOUNT = 102  # Состояние для ввода суммы доната
 
+# Состояния для редактирования профиля
+EDIT_NAME, EDIT_AGE, EDIT_CITY, EDIT_DESCRIPTION, EDIT_PHOTO = range(200, 205)
+
 # Словарь для хранения получателя доната {telegram_id: recipient_user_id}
 pending_donations = {}
 
@@ -1046,6 +1049,10 @@ async def show_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать свою анкету"""
     user = db.get_user_by_telegram_id(update.effective_user.id)
     
+    if not user:
+        await update.message.reply_text("❌ Вы не зарегистрированы. Отправьте /start")
+        return
+    
     gender_emoji = "👨" if user.gender == 'male' else "👩"
     text = (
         f"👤 Ваша анкета:\n\n"
@@ -1058,11 +1065,17 @@ async def show_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.gender == 'female' and user.hashtag:
         text += f"\n\n🏷 Ваш уникальный код: {user.hashtag}\nМужчины могут найти вас по этому коду!"
     
+    # Кнопка редактирования
+    keyboard = [
+        [InlineKeyboardButton("✏️ Редактировать профиль", callback_data='edit_profile')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     try:
         with open(user.photo_path, 'rb') as photo:
-            await update.message.reply_photo(photo=photo, caption=text)
+            await update.message.reply_photo(photo=photo, caption=text, reply_markup=reply_markup)
     except:
-        await update.message.reply_text(text)
+        await update.message.reply_text(text, reply_markup=reply_markup)
 
 
 async def exit_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1454,6 +1467,253 @@ async def cancel_hashtag_search_callback(update: Update, context: ContextTypes.D
     hashtag_search_mode.pop(update.effective_user.id, None)
     
     await query.edit_message_text("❌ Поиск отменен.")
+
+
+# ========== Редактирование профиля ==========
+
+async def edit_profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начать редактирование профиля"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    if not user:
+        await query.message.reply_text("❌ Вы не зарегистрированы.")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("✏️ Имя", callback_data='edit_name')],
+        [InlineKeyboardButton("🎂 Возраст", callback_data='edit_age')],
+        [InlineKeyboardButton("📍 Город", callback_data='edit_city')],
+        [InlineKeyboardButton("📝 Описание", callback_data='edit_description')],
+        [InlineKeyboardButton("📷 Фото", callback_data='edit_photo')],
+        [InlineKeyboardButton("❌ Отмена", callback_data='cancel_edit_profile')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.reply_text(
+        "✏️ Редактирование профиля\n\n"
+        "Выберите, что хотите изменить:",
+        reply_markup=reply_markup
+    )
+
+
+async def edit_name_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начать редактирование имени"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data='cancel_edit_profile')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.reply_text(
+        f"✏️ Редактирование имени\n\n"
+        f"Текущее имя: {user.name}\n\n"
+        f"Введите новое имя (минимум 2 символа):",
+        reply_markup=reply_markup
+    )
+    return EDIT_NAME
+
+
+async def edit_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нового имени"""
+    name = update.message.text.strip()
+    
+    if len(name) < 2:
+        await update.message.reply_text(
+            "❌ Имя слишком короткое. Пожалуйста, укажите имя (минимум 2 символа):"
+        )
+        return EDIT_NAME
+    
+    if len(name) > 100:
+        await update.message.reply_text(
+            "❌ Имя слишком длинное. Пожалуйста, укажите имя до 100 символов:"
+        )
+        return EDIT_NAME
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    db.update_user_profile(user.id, name=name)
+    db.invalidate_user_cache(update.effective_user.id)
+    
+    await update.message.reply_text(
+        f"✅ Имя обновлено на: {name}\n\n"
+        f"Профиль сохранён!"
+    )
+    
+    return ConversationHandler.END
+
+
+async def edit_age_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начать редактирование возраста"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data='cancel_edit_profile')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.reply_text(
+        f"🎂 Редактирование возраста\n\n"
+        f"Текущий возраст: {user.age}\n\n"
+        f"Введите новый возраст:",
+        reply_markup=reply_markup
+    )
+    return EDIT_AGE
+
+
+async def edit_age_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нового возраста"""
+    age_text = update.message.text.strip()
+    
+    try:
+        age = int(age_text)
+        if age < 18:
+            await update.message.reply_text(
+                "❌ Возраст должен быть не менее 18 лет."
+            )
+            return EDIT_AGE
+        if age > 100:
+            await update.message.reply_text(
+                "❌ Пожалуйста, укажите корректный возраст."
+            )
+            return EDIT_AGE
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Пожалуйста, введите число (например: 22)"
+        )
+        return EDIT_AGE
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    db.update_user_profile(user.id, age=age)
+    db.invalidate_user_cache(update.effective_user.id)
+    
+    await update.message.reply_text(
+        f"✅ Возраст обновлён на: {age}\n\n"
+        f"Профиль сохранён!"
+    )
+    
+    return ConversationHandler.END
+
+
+async def edit_city_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начать редактирование города"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data='cancel_edit_profile')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.reply_text(
+        f"📍 Редактирование города\n\n"
+        f"Текущий город: {user.city}\n\n"
+        f"Введите новый город:",
+        reply_markup=reply_markup
+    )
+    return EDIT_CITY
+
+
+async def edit_city_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нового города"""
+    city = update.message.text.strip()
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    db.update_user_profile(user.id, city=city)
+    db.invalidate_user_cache(update.effective_user.id)
+    
+    await update.message.reply_text(
+        f"✅ Город обновлён на: {city}\n\n"
+        f"Профиль сохранён!"
+    )
+    
+    return ConversationHandler.END
+
+
+async def edit_description_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начать редактирование описания"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data='cancel_edit_profile')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.reply_text(
+        f"📝 Редактирование описания\n\n"
+        f"Текущее описание:\n{user.description}\n\n"
+        f"Введите новое описание:",
+        reply_markup=reply_markup
+    )
+    return EDIT_DESCRIPTION
+
+
+async def edit_description_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нового описания"""
+    description = update.message.text.strip()
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    db.update_user_profile(user.id, description=description)
+    db.invalidate_user_cache(update.effective_user.id)
+    
+    await update.message.reply_text(
+        f"✅ Описание обновлено!\n\n"
+        f"Профиль сохранён!"
+    )
+    
+    return ConversationHandler.END
+
+
+async def edit_photo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начать редактирование фото"""
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data='cancel_edit_profile')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.reply_text(
+        "📷 Редактирование фото\n\n"
+        "Загрузите новое фото:",
+        reply_markup=reply_markup
+    )
+    return EDIT_PHOTO
+
+
+async def edit_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нового фото"""
+    photo = update.message.photo[-1]
+    
+    user = db.get_user_by_telegram_id(update.effective_user.id)
+    
+    # Сохраняем новое фото
+    file = await context.bot.get_file(photo.file_id)
+    file_path = os.path.join(config.PHOTOS_DIR, f"{update.effective_user.id}.jpg")
+    await file.download_to_drive(file_path)
+    
+    # Обновляем профиль
+    db.update_user_profile(user.id, photo_path=file_path)
+    db.invalidate_user_cache(update.effective_user.id)
+    
+    await update.message.reply_text(
+        "✅ Фото обновлено!\n\n"
+        "Профиль сохранён!"
+    )
+    
+    return ConversationHandler.END
+
+
+async def cancel_edit_profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена редактирования профиля"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text("❌ Редактирование отменено.")
+    return ConversationHandler.END
 
 
 # ========== Платежи и подписки ==========
@@ -1897,6 +2157,31 @@ def main():
     application.add_handler(CallbackQueryHandler(show_all_chats_callback, pattern='^show_all_chats$'))
     application.add_handler(CallbackQueryHandler(view_partner_callback, pattern='^view_partner_'))
     application.add_handler(CallbackQueryHandler(cancel_hashtag_search_callback, pattern='^cancel_hashtag_search$'))
+    
+    # Обработчик редактирования профиля (ConversationHandler)
+    edit_profile_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(edit_profile_callback, pattern='^edit_profile$'),
+            CallbackQueryHandler(edit_name_start, pattern='^edit_name$'),
+            CallbackQueryHandler(edit_age_start, pattern='^edit_age$'),
+            CallbackQueryHandler(edit_city_start, pattern='^edit_city$'),
+            CallbackQueryHandler(edit_description_start, pattern='^edit_description$'),
+            CallbackQueryHandler(edit_photo_start, pattern='^edit_photo$')
+        ],
+        states={
+            EDIT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_name_handler)],
+            EDIT_AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_age_handler)],
+            EDIT_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_city_handler)],
+            EDIT_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_description_handler)],
+            EDIT_PHOTO: [MessageHandler(filters.PHOTO, edit_photo_handler)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_edit_profile_callback, pattern='^cancel_edit_profile$'),
+            CommandHandler('cancel', cancel_edit_profile_callback)
+        ],
+    )
+    
+    application.add_handler(edit_profile_handler)
     
     # Обработчики платежей и подписок
     application.add_handler(CallbackQueryHandler(buy_subscription_callback, pattern='^buy_subscription$'))
